@@ -1,4 +1,3 @@
-js
 /*
  * Gym-Tracker – Konfiguration
  * Supabase-Projekt und öffentlicher Key.
