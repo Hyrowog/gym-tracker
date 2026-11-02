@@ -1,49 +1,62 @@
 <!doctype html>
-<html lang="de-CH" data-theme="dark">
+<html lang="de-CH" data-theme="dark" data-palette="stahl">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#111214">
+  <meta name="theme-color" content="#0e1217">
   <meta name="robots" content="noindex, nofollow">
   <meta name="referrer" content="no-referrer">
   <title>Gym-Tracker</title>
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23111214'/%3E%3Cpath d='M7 12v8M10 10v12M22 10v12M25 12v8M10 16h12' stroke='%23e3ad4f' stroke-width='2.5' stroke-linecap='round'/%3E%3C/svg%3E">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%231f5fd0'/%3E%3Cpath d='M7 12v8M10 10v12M22 10v12M25 12v8M10 16h12' stroke='%23ffffff' stroke-width='2.5' stroke-linecap='round'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,400..800&display=swap">
   <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="desktop.css" media="(min-width: 900px)">
 </head>
-<body>
-  <!-- App-Gerüst. Der Inhalt von #view wird von app.js gezeichnet. -->
-  <div id="app" class="app" hidden>
-    <header class="topbar">
-      <div class="topbar-inner">
-        <span class="brand">Gym-Tracker</span>
-        <nav class="tabbar" aria-label="Hauptnavigation">
-          <button class="tab" data-action="nav" data-view="training">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9v6M7 7v10M17 7v10M20 9v6M7 12h10"/></svg>
-            <span>Training</span>
-          </button>
-          <button class="tab" data-action="nav" data-view="history">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 6h14M5 12h14M5 18h9"/></svg>
-            <span>Verlauf</span>
-          </button>
-          <button class="tab" data-action="nav" data-view="stats">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19h16M6 15l4-4 3 3 5-6"/></svg>
-            <span>Fortschritt</span>
-          </button>
-          <button class="tab" data-action="nav" data-view="settings">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h9M18 7h1M5 17h3M12 17h7"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg>
-            <span>Mehr</span>
-          </button>
-        </nav>
-        <button class="sync-pill" id="syncPill" data-action="nav" data-view="settings" data-status="local">
-          <span class="sync-chip"><span class="dot" aria-hidden="true"></span><span class="sync-label">Sync nicht eingerichtet</span></span>
+<body data-view="training">
+  <!-- App-Gerüst. Der Inhalt von #view wird von app.js gezeichnet.
+       Handy: Tab-Leiste unten. PC (desktop.css): Seitenleiste links. -->
+  <div id="app" class="shell" hidden>
+    <aside class="side">
+      <div class="brand"><span class="logo"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9v6M7 7v10M17 7v10M20 9v6M7 12h10"/></svg></span>Gym-Tracker</div>
+      <nav class="nav" aria-label="Hauptnavigation">
+        <button class="tab" data-action="nav" data-view="training">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9v6M7 7v10M17 7v10M20 9v6M7 12h10"/></svg>
+          <span>Training</span>
         </button>
-      </div>
-    </header>
+        <button class="tab" data-action="nav" data-view="history">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 6h14M5 12h14M5 18h9"/></svg>
+          <span>Verlauf</span>
+        </button>
+        <button class="tab" data-action="nav" data-view="stats">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19h16M6 15l4-4 3 3 5-6"/></svg>
+          <span>Fortschritt</span>
+        </button>
+        <button class="tab" data-action="nav" data-view="settings">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h9M18 7h1M5 17h3M12 17h7"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg>
+          <span>Mehr</span>
+        </button>
+      </nav>
+      <button class="side-foot sync-pill" id="syncPill" data-action="nav" data-view="settings" data-status="local">
+        <i class="dot" aria-hidden="true"></i><span class="sync-label">Sync nicht eingerichtet</span>
+      </button>
+    </aside>
     <main id="view" class="main"></main>
   </div>
 
   <!-- Startbildschirm ohne Schlüssel im Link -->
   <div id="gate" class="gate" hidden></div>
+
+  <!-- Pausen-Timer (startet nach dem Haken bei einem Satz) -->
+  <div class="rest" id="rest" role="timer" hidden>
+    <span class="rest-time" id="restTime">1:30</span>
+    <span class="rest-label" id="restLabel">Pause</span>
+    <button data-action="rest-add" data-sec="-15" aria-label="15 Sekunden weniger">−15</button>
+    <button data-action="rest-add" data-sec="15" aria-label="15 Sekunden mehr">+15</button>
+    <button data-action="rest-skip">Weiter</button>
+    <div class="rest-bar"><i id="restBar"></i></div>
+  </div>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <input type="file" id="importFile" accept="application/json,.json" hidden>

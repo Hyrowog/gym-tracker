@@ -1,0 +1,128 @@
+/*
+ * Gym-Tracker – PC-Layout (ab 900px Breite)
+ *
+ * Wird von index.html nur ab 900px geladen:
+ *   <link rel="stylesheet" href="desktop.css" media="(min-width: 900px)">
+ * styles.css enthält das Handy-Layout aus dem Redesign. Diese Datei
+ * überschreibt nur, was am PC anders ist: Tabs oben statt unten, breitere
+ * Spalte, zwei Spalten wo Platz ist, grössere Klickflächen für die Maus.
+ * Farben, Schrift und Tokens bleiben unverändert.
+ *
+ * Navigation: Es werden beide Gerüste unterstützt, das des Redesigns
+ * (.shell > .side > .brand + .nav + .side-foot) und das bisherige der App
+ * (.topbar > .topbar-inner > .brand + .tabbar > .tab, .sync-pill).
+ */
+@media (min-width: 900px) {
+  :root {
+    --topnav: 60px;      /* Höhe der Tab-Leiste oben */
+    --col: 1100px;       /* maximale Breite der Inhaltsspalte inkl. Rand */
+    --gutter-pc: 28px;   /* seitlicher Rand am PC */
+  }
+
+  /* ---------- Gerüst: Tab-Leiste oben ---------- */
+  .shell { display: block; }
+
+  .side,
+  .topbar {
+    position: sticky; top: 0; z-index: 30;
+    display: flex; flex-direction: row; align-items: center; gap: 18px;
+    height: var(--topnav); padding: 0 max(var(--gutter-pc), calc((100% - var(--col)) / 2 + var(--gutter-pc)));
+    background: var(--surface); border-bottom: 1px solid var(--line); border-right: 0;
+  }
+  .topbar { display: block; padding: 0 var(--gutter-pc); }
+  .topbar-inner {
+    display: flex; align-items: center; gap: 18px;
+    max-width: calc(var(--col) - 2 * var(--gutter-pc)); height: var(--topnav); margin: 0 auto; padding: 0;
+  }
+
+  .brand { display: flex; align-items: center; gap: 10px; flex: none; font-weight: 700; font-stretch: 85%; font-size: 18px; padding: 0; }
+
+  .nav,
+  .tabbar {
+    position: static; inset: auto; z-index: auto;
+    display: flex; flex-direction: row; align-items: center; gap: 2px;
+    height: auto; padding: 0; margin: 0;
+    background: none; border: 0; box-shadow: none;
+  }
+  .nav button,
+  .tabbar .tab {
+    flex-direction: row; justify-content: flex-start; gap: 8px;
+    min-height: 40px; padding: 0 12px; border-radius: var(--r-sm);
+    font-size: 14.5px; font-weight: 550; color: var(--text-2); white-space: nowrap;
+  }
+  .nav svg,
+  .tabbar .tab svg { width: 19px; height: 19px; }
+  .nav button:hover,
+  .tabbar .tab:hover { background: var(--surface-2); color: var(--text); }
+  .nav button[aria-current="page"],
+  .tabbar .tab[aria-current="page"] { background: var(--accent-soft); color: var(--accent); }
+
+  .side-foot { display: flex; margin: 0 0 0 auto; align-items: center; gap: 8px; padding: 0; font-size: 12.5px; color: var(--text-2); min-width: 0; }
+  .side-foot i { width: 8px; height: 8px; border-radius: 50%; background: var(--pr); flex: none; }
+  .sync-pill { margin-left: auto; flex: none; }
+  /* Sync-Anzeige als Knopf (.side-foot.sync-pill) */
+  button.side-foot { min-height: 36px; padding: 0 10px; border: 0; border-radius: var(--r-sm); background: none; font: inherit; font-size: 12.5px; color: var(--text-2); white-space: nowrap; }
+  button.side-foot:hover { background: var(--surface-2); color: var(--text); }
+
+  /* ---------- Inhaltsspalte ---------- */
+  .main {
+    width: 100%; max-width: var(--col);
+    padding-block: 28px 80px;
+    padding-left: var(--gutter-pc); padding-right: var(--gutter-pc);
+  }
+  /* Platz für den Pausen-Timer unten im Training */
+  body[data-view="training"] .main { padding-bottom: 128px; }
+
+  .toast { top: calc(var(--topnav) + 12px); }
+
+  /* ---------- Training ---------- */
+  /* klebt unter der Tab-Leiste; der Schatten in Hintergrundfarbe deckt den Spalt darüber ab */
+  .session { top: calc(var(--topnav) + 10px); padding: 12px 18px 15px; gap: 16px; box-shadow: 0 -10px 0 var(--bg); }
+
+  /* Übungen links, Woche und Rekorde rechts */
+  .wk { grid-template-columns: minmax(0, 1fr) 280px; gap: 20px; }
+  .aside { display: flex; flex-direction: column; gap: 12px; position: sticky; top: calc(var(--topnav) + 100px); }
+
+  .ex { padding: 16px 0 8px; }
+  .ex-h { padding: 0 16px 0 18px; }
+  .x { width: 36px; height: 36px; }
+
+  /* Satzzeilen: breitere Spalte für «Zuletzt», Felder teilen sich den Rest wie im Redesign */
+  .grid { --cols: 40px 120px minmax(0, 1fr) minmax(0, 1fr) 48px; }
+  .labels, .set-main { gap: 10px; padding: 0 16px 0 18px; }
+  .set-main { min-height: 56px; }
+  .set { cursor: pointer; }
+  .num { height: 40px; cursor: text; }
+  .check { width: 42px; height: 42px; }
+  /* Plus/Minus unter den kg- und Wdh.-Feldern ausrichten (18 + 40 + 10 + 120 + 10) */
+  .set-tools { gap: 8px 20px; padding: 2px 16px 12px 198px; }
+  .nudge button { min-width: 52px; height: 38px; }
+  .add-set { margin: 4px 18px 8px; }
+
+  .meta { grid-template-columns: 200px minmax(0, 1fr); }
+
+  /* ---------- Fortschritt: Diagramm oben, Heatmap und Bestwerte nebeneinander ---------- */
+  .st-grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
+  .span2 { grid-column: span 2; }
+  .st-grid > .card { padding: 18px; }
+  /* Chart.js-Variante: Höhe kommt vom Container (bei SVG setzt das Script die Höhe selbst) */
+  .chart:has(canvas) { height: 340px; }
+  #bwChart:has(canvas) { height: 220px; }
+  .tbl-wrap { max-height: 320px; }
+
+  /* ---------- Verlauf ---------- */
+  .log summary { padding: 12px 18px; }
+  .log-body { padding: 0 18px 14px 74px; }
+
+  /* ---------- Mehr ---------- */
+  .tiles { grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 14px; }
+  .tile:hover { border-color: var(--text-3); }
+  .tile[aria-pressed="true"]:hover { border-color: var(--accent); }
+
+  /* ---------- Pausen-Timer: unten rechts in der Inhaltsspalte ---------- */
+  .rest {
+    left: auto; width: 400px;
+    right: max(var(--gutter-pc), calc((100vw - var(--col)) / 2 + var(--gutter-pc)));
+    bottom: 24px;
+  }
+}

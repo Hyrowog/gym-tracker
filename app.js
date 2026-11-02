@@ -44,6 +44,16 @@ const RANGES = {
 
 const TYPE_LABELS = { weight: 'Gewicht', bodyweight: 'Körpergewicht' };
 
+/* Farbwelten aus dem Redesign (nur Darstellung, pro Gerät in prefs gespeichert) */
+const PALETTES = [
+  ['stahl', 'Stahl', 'Kühl und sachlich, wirkt wie ein Werkzeug.'],
+  ['messing', 'Messing', 'Warmes Amber, ruhig und mit viel Kontrast.'],
+  ['tartan', 'Tartan', 'Das Rot der Laufbahn. Am energiegeladensten.'],
+  ['rasen', 'Rasen', 'Grün wie die Schlittenbahn. Akzent und «erledigt» fallen zusammen.'],
+  ['magnesia', 'Magnesia', 'Fast nur Schwarz und Weiss. Farbe bleibt für Status und Rekorde.'],
+  ['indigo', 'Indigo', 'Violett-Blau, etwas verspielter.'],
+];
+
 const SYNC_LABELS = {
   local: 'Sync nicht eingerichtet',
   syncing: 'Speichert …',
@@ -60,9 +70,11 @@ const state = {
     activeWorkoutId: null,    // Training, das gerade bearbeitet wird
     showLinkHint: false,      // Hinweis "Link speichern" nach dem Erstellen
   },
-  prefs: { theme: 'dark', range: '3m', lastSecret: null },
+  prefs: { theme: 'dark', palette: 'stahl', range: '3m', lastSecret: null },
   view: 'training',
   statsExerciseId: null,
+  focus: null,                // aktueller Satz im Training { entry, set } (nur Anzeige)
+  summary: null,              // Zusammenfassung nach «Fertig» (nur Anzeige)
   charts: {},                 // aktive Chart.js-Instanzen
   sync: {
     configured: false,
@@ -155,12 +167,28 @@ function toast(message) {
   toastTimer = setTimeout(() => el.classList.remove('show'), 2200);
 }
 
+/**
+ * Farbe eines CSS-Tokens als "rgb(...)". Die Tokens nutzen light-dark() und
+ * color-mix(), darum über ein unsichtbares Element auflösen lassen.
+ */
+let colorProbe = null;
 function cssVar(name) {
-  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  if (!colorProbe) {
+    colorProbe = document.createElement('span');
+    colorProbe.style.display = 'none';
+    document.body.appendChild(colorProbe);
+  }
+  colorProbe.style.color = '';
+  colorProbe.style.color = `var(${name})`;
+  return getComputedStyle(colorProbe).color;
+}
+function cssFont() {
+  return getComputedStyle(document.documentElement).getPropertyValue('--font').trim() || 'system-ui, sans-serif';
 }
 
 const ICON_X = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7l10 10M17 7L7 17"/></svg>';
-const ICON_CHEV = '<svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>';
+const ICON_CHECK = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>';
+const ICON_STAR = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.5l2.9 6.2 6.8.8-5 4.6 1.3 6.7-6-3.3-6 3.3 1.3-6.7-5-4.6 6.8-.8z"/></svg>';
 
 /* ---------------------------------------------------------------------
    3. Datenmodell & lokaler Speicher
@@ -337,8 +365,12 @@ function startWorkout(mode) {
     }));
   }
   state.meta.activeWorkoutId = w.id;
+  state.meta.doneSets = { [w.id]: {} }; // Haken-Stand nur lokal: neues Training, noch nichts bestätigt
+  state.focus = null;
+  state.summary = null;
   commit();
   render();
+  window.scrollTo(0, 0);
 }
 
 /* ---------------------------------------------------------------------
@@ -566,22 +598,23 @@ function renderGate(errorText = '') {
   const gate = $('#gate');
   const saved = state.prefs.lastSecret && SECRET_PATTERN.test(state.prefs.lastSecret);
   gate.innerHTML = `
-    <div>
-      <h1>Gym-Tracker</h1>
+    <div class="gate-brand">
+      <span class="logo"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9v6M7 7v10M17 7v10M20 9v6M7 12h10"/></svg></span>
+      <h1 class="title">Gym-Tracker</h1>
     </div>
     <p>Dieser Tracker hat kein Login. Deine Daten gehören zu einem geheimen Schlüssel, der im Link steckt
       (<span class="num-tab">…/?k=…</span>). Wer den Link hat, sieht die Daten – also gut aufbewahren und nicht teilen.</p>
     ${errorText ? `<p class="error">${esc(errorText)}</p>` : ''}
     <div class="gate-actions">
-      ${saved ? '<button class="btn btn-primary btn-block" data-action="gate-saved">Mit gespeichertem Link weiter</button>' : ''}
-      <button class="btn ${saved ? 'btn-secondary' : 'btn-primary'} btn-block" data-action="gate-new">Neuen Tracker erstellen</button>
+      ${saved ? '<button class="btn btn-p block" data-action="gate-saved">Mit gespeichertem Link weiter</button>' : ''}
+      <button class="btn ${saved ? 'btn-s' : 'btn-p'} block" data-action="gate-new">Neuen Tracker erstellen</button>
     </div>
     <div class="divider">oder</div>
-    <form class="gate-actions" data-form="gate-open">
+    <form class="gate-actions card" data-form="gate-open">
       <label class="field">Bestehenden Link oder Schlüssel einfügen
         <input class="input" name="link" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="https://…/?k=…">
       </label>
-      <button class="btn btn-secondary btn-block" type="submit">Öffnen</button>
+      <button class="btn btn-s block" type="submit">Öffnen</button>
     </form>
     <p class="small muted">Tipp: Den Link nach dem Erstellen als Lesezeichen speichern und auf Handy und PC öffnen.</p>`;
   $('#app').hidden = true;
@@ -590,10 +623,13 @@ function renderGate(errorText = '') {
 
 /* ---------------------------------------------------------------------
    6. Ansichten
+   Aussehen nach dem Redesign: Satz-Zeilen mit Haken, Spalte «Zuletzt»,
+   Plus/Minus beim aktuellen Satz, Kopfzeile mit Dauer/Volumen/Sätzen.
    --------------------------------------------------------------------- */
 function render() {
   destroyCharts();
-  document.querySelectorAll('.tab').forEach((t) => {
+  document.body.dataset.view = state.view;
+  document.querySelectorAll('.nav button').forEach((t) => {
     if (t.dataset.view === state.view) t.setAttribute('aria-current', 'page');
     else t.removeAttribute('aria-current');
   });
@@ -604,6 +640,8 @@ function render() {
   else view.innerHTML = renderTraining();
 
   if (state.view === 'stats') drawStats();
+  if (!activeWorkout()) hideRest();
+  tick();
 }
 
 function setView(name) {
@@ -612,39 +650,124 @@ function setView(name) {
   window.scrollTo(0, 0);
 }
 
+/* --- Kennzahlen für die Anzeige (ändern keine Daten) --- */
+function e1rmOf(s) { const w = s.weight || 0; return s.reps === 1 ? w : w * (1 + (s.reps || 0) / 30); }
+function scoreOf(ex, s) { return ex.type === 'bodyweight' ? (s.reps || 0) : e1rmOf(s); }
+
+/** Bester Wert pro Übung über alle Trainings ausser excludeId (für Rekorde). */
+function bestScores(excludeId) {
+  const best = {};
+  for (const w of state.data.workouts) {
+    if (w.id === excludeId) continue;
+    for (const en of w.entries) {
+      const ex = getExercise(en.exerciseId);
+      if (!ex) continue;
+      for (const s of validSets(en)) best[ex.id] = Math.max(best[ex.id] ?? 0, scoreOf(ex, s));
+    }
+  }
+  return best;
+}
+/** Rekord = bestätigter Satz schlägt den bisherigen Bestwert (nur wenn es schon frühere Sätze gab). */
+function isPR(ex, s, done, best) {
+  return !!done && s.reps > 0 && best[ex.id] !== undefined && scoreOf(ex, s) > best[ex.id];
+}
+
+function setText(ex, s) {
+  if (ex.type === 'bodyweight') return s.weight ? `+${fmtNum(s.weight)} × ${s.reps}` : `${s.reps} Wdh.`;
+  return `${fmtNum(s.weight || 0)} × ${s.reps}`;
+}
+function thousand(n) { return Math.round(n).toLocaleString('de-CH'); }
+
+/* --- Haken pro Satz: nur lokal auf diesem Gerät (state.meta.doneSets),
+       das gespeicherte/synchronisierte Datenformat bleibt unverändert. --- */
+function doneMap(w) {
+  const all = state.meta.doneSets || (state.meta.doneSets = {});
+  if (!all[w.id]) {
+    // Training ohne Haken-Stand (z.B. aus dem Verlauf geöffnet): eingetragene Sätze gelten als erledigt
+    all[w.id] = {};
+    w.entries.forEach((en) => { all[w.id][en.id] = en.sets.map((s) => s.reps !== null && s.reps > 0); });
+  }
+  return all[w.id];
+}
+function isDone(w, en, i) { const m = doneMap(w); return !!(m[en.id] && m[en.id][i]); }
+function setDone(w, en, i, v) { const m = doneMap(w); (m[en.id] || (m[en.id] = []))[i] = !!v; }
+
+function sessionCounts(w) {
+  let done = 0, all = 0, vol = 0;
+  w.entries.forEach((en) => en.sets.forEach((s, i) => {
+    all++;
+    if (isDone(w, en, i)) { done++; vol += (s.weight || 0) * (s.reps || 0); }
+  }));
+  return { done, all, vol };
+}
+
+function nextOpen(w) {
+  for (const en of w.entries) {
+    const i = en.sets.findIndex((s, j) => !isDone(w, en, j));
+    if (i >= 0) return { entry: en.id, set: i };
+  }
+  return null;
+}
+
 /* --- Training --- */
 function renderTraining() {
   const active = state.meta.activeWorkoutId && getWorkout(state.meta.activeWorkoutId);
   if (active) return renderWorkoutEditor(active);
+  if (state.summary) return renderSummary();
 
   const last = sortedWorkouts().find((w) => w.entries.length > 0);
-  const recent = sortedWorkouts().slice(0, 3);
+  const recent = sortedWorkouts().filter((w) => w.entries.length).slice(0, 3);
   const lastInfo = last
-    ? `${relativeDay(last.date)} · ${last.entries.length} ${last.entries.length === 1 ? 'Übung' : 'Übungen'}`
+    ? last.entries.map((e) => (getExercise(e.exerciseId) || {}).name).filter(Boolean).join(', ')
     : 'Noch kein Training';
 
   return `
-  <section class="view">
-    <div class="view-head">
-      <div>
-        <h1 class="view-title">Training</h1>
-        <p class="view-sub">${esc(formatDate(todayISO()))}</p>
-      </div>
-    </div>
+    <div class="head"><div><h1 class="title">Training</h1><p class="sub">${esc(formatDate(todayISO()))}</p></div></div>
     ${linkHintHtml()}
     ${syncNoticeHtml()}
-    <div class="start-grid">
-      <button class="btn ${last ? 'btn-primary' : 'btn-secondary'} btn-lg" data-action="start-repeat" ${last ? '' : 'disabled'}>
-        Letztes Training wiederholen<small>${esc(lastInfo)}</small>
-      </button>
-      <button class="btn ${last ? 'btn-secondary' : 'btn-primary'} btn-lg" data-action="start-empty">
-        Leeres Training<small>Übungen selbst wählen</small>
-      </button>
+    <div class="start">
+      <button class="btn ${last ? 'btn-p' : 'btn-s'}" data-action="start-repeat" ${last ? '' : 'disabled'}>
+        <span>Letztes Training wiederholen</span><small>${esc(lastInfo)}</small></button>
+      <button class="btn ${last ? 'btn-s' : 'btn-p'}" data-action="start-empty">
+        <span>Leeres Training</span><small>Übungen selbst wählen</small></button>
     </div>
+    <div class="card"><div class="eyebrow">Diese Woche</div>${weekStrip()}</div>
     ${recent.length ? `
-      <h2 class="section-title">Zuletzt</h2>
-      <div class="card"><div class="list">${recent.map(workoutListItem).join('')}</div></div>` : ''}
-  </section>`;
+      <div class="eyebrow">Zuletzt</div>
+      <div class="card log">${recent.map((w) => logRow(w, 0)).join('')}</div>` : ''}`;
+}
+
+function weekStrip() {
+  const now = parseISODate(todayISO());
+  const mon = addDays(now, -((now.getDay() + 6) % 7));
+  const days = new Set(state.data.workouts
+    .filter((w) => w.id !== state.meta.activeWorkoutId && w.entries.some((e) => validSets(e).length))
+    .map((w) => w.date));
+  const today = todayISO();
+  return `<div class="week">${['Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So'].map((l, i) => {
+    const iso = toISODate(addDays(mon, i));
+    const on = days.has(iso);
+    return `<div class="${on ? 'on' : ''} ${iso === today ? 'now' : ''}"><i>${on ? ICON_CHECK : ''}</i>${l}</div>`;
+  }).join('')}</div>`;
+}
+
+function renderSummary() {
+  const s = state.summary;
+  return `
+    <div class="card done-hero">
+      <div class="eyebrow">Gespeichert</div>
+      <h1 class="title">Training abgeschlossen</h1>
+      <p class="muted">${esc(s.names)}</p>
+    </div>
+    <div class="stats">
+      <div class="stat"><div class="v">${s.min === null ? '–' : s.min}</div><div class="l">Minuten</div></div>
+      <div class="stat"><div class="v">${thousand(s.vol)}</div><div class="l">kg Volumen</div></div>
+      <div class="stat"><div class="v">${s.sets}</div><div class="l">Sätze</div></div>
+      <div class="stat"><div class="v">${s.prs.length}</div><div class="l">Rekorde</div></div>
+    </div>
+    ${s.prs.length ? `<div class="card"><div class="eyebrow">Neue Rekorde</div>${s.prs.map((p) => `
+      <div class="side-row"><span>${esc(p.name)}</span><b>${esc(p.text)}</b></div>`).join('')}</div>` : ''}
+    <button class="btn btn-p block" data-action="summary-close">Zur Übersicht</button>`;
 }
 
 function linkHintHtml() {
@@ -654,8 +777,8 @@ function linkHintHtml() {
       <strong>Neuer Tracker erstellt.</strong>
       <span>Speichere diesen Link als Lesezeichen. Ohne ihn kommst du auf einem anderen Gerät nicht an deine Daten.</span>
       <div class="row">
-        <button class="btn btn-primary btn-sm" data-action="copy-link">Link kopieren</button>
-        <button class="btn btn-secondary btn-sm" data-action="dismiss-link-hint">Erledigt</button>
+        <button class="btn btn-p btn-sm" data-action="copy-link">Link kopieren</button>
+        <button class="btn btn-s btn-sm" data-action="dismiss-link-hint">Erledigt</button>
       </div>
     </div>`;
 }
@@ -665,112 +788,134 @@ function syncNoticeHtml() {
   return `
     <div class="notice">
       <strong>Sync nicht eingerichtet</strong>
-      <span class="small">Deine Daten werden nur in diesem Browser gespeichert. Für Handy + PC: Supabase einrichten (siehe SETUP.md).</span>
+      <span>Deine Daten werden nur in diesem Browser gespeichert. Für Handy + PC: Supabase einrichten (siehe SETUP.md).</span>
     </div>`;
 }
 
-function workoutListItem(w) {
+/** Zeile im Verlauf: aufklappbar, mit Sätzen und «Bearbeiten». */
+function logRow(w, prCount) {
+  const d = parseISODate(w.date);
   const names = w.entries.map((e) => (getExercise(e.exerciseId) || {}).name).filter(Boolean);
-  const sets = w.entries.reduce((sum, e) => sum + validSets(e).length, 0);
-  return `
-    <button class="list-item" data-action="open-workout" data-id="${esc(w.id)}">
-      <div class="grow">
-        <div class="title">${esc(formatDate(w.date, 'weekday'))}</div>
-        <div class="sub">${names.length ? esc(names.join(', ')) : 'Keine Übungen'}${w.note ? ' · ' + esc(w.note.slice(0, 60)) : ''}</div>
-      </div>
-      <span class="meta">${sets} ${sets === 1 ? 'Satz' : 'Sätze'}</span>
-      ${ICON_CHEV}
-    </button>`;
+  const sets = w.entries.reduce((a, e) => a + validSets(e).length, 0);
+  const vol = w.entries.reduce((a, e) => a + validSets(e).reduce((x, s) => x + (s.weight || 0) * s.reps, 0), 0);
+  return `<details>
+    <summary>
+      <div class="date"><b>${d.getDate()}</b><span>${esc(d.toLocaleDateString('de-CH', { weekday: 'short' }).replace('.', ''))}</span></div>
+      <div style="min-width:0"><div class="t">${names.length ? esc(names.join(', ')) : 'Keine Übungen'}</div><div class="s">${sets} ${sets === 1 ? 'Satz' : 'Sätze'} · ${thousand(vol)} kg</div></div>
+      ${prCount > 0 ? `<span class="badge">${ICON_STAR}${prCount}</span>` : '<span></span>'}
+    </summary>
+    <div class="log-body">
+      ${w.entries.map((en) => {
+        const ex = getExercise(en.exerciseId);
+        if (!ex) return '';
+        const list = validSets(en).map((s) => esc(setText(ex, s))).join(', ') || '–';
+        return `<div><span>${esc(ex.name)}${en.variant ? ` <small class="muted">(${esc(en.variant)})</small>` : ''}</span><span>${list}</span></div>`;
+      }).join('')}
+      ${w.note ? `<p class="log-note">${esc(w.note)}</p>` : ''}
+      <button class="btn btn-s" data-action="open-workout" data-id="${esc(w.id)}">Bearbeiten</button>
+    </div>
+  </details>`;
 }
 
 function renderWorkoutEditor(w) {
   const usedIds = new Set(w.entries.map((e) => e.exerciseId));
   const available = exercisesByRecency().filter((e) => !usedIds.has(e.id));
+  if (state.focus && !w.entries.some((e) => e.id === state.focus.entry && e.sets[state.focus.set])) state.focus = null;
+  const focus = state.focus || nextOpen(w);
+  state.focus = focus;
+  const c = sessionCounts(w);
+  const best = bestScores(w.id);
 
   return `
-  <section class="view" data-workout="${esc(w.id)}">
-    <div class="view-head">
-      <div>
-        <h1 class="view-title">${w.date === todayISO() ? 'Heutiges Training' : 'Training'}</h1>
-        <p class="view-sub">${esc(formatDate(w.date))}</p>
-      </div>
-    </div>
+    <div class="head"><div><h1 class="title">${w.date === todayISO() ? 'Heutiges Training' : 'Training'}</h1><p class="sub">${esc(formatDate(w.date))}</p></div></div>
     ${linkHintHtml()}
-
-    <div class="workout-meta">
-      <label class="field">Datum
-        <input class="input" type="date" data-field="workout-date" value="${esc(w.date)}" max="${todayISO()}">
-      </label>
-      <label class="field">Notiz
-        <input class="input" data-field="workout-note" value="${esc(w.note)}" placeholder="optional, z.B. «müde» oder «neues Programm»" maxlength="2000">
-      </label>
+    <div class="session" data-workout="${esc(w.id)}">
+      <div><div class="v" id="dur">–</div><div class="l">Dauer</div></div>
+      <div><div class="v" id="vol">${thousand(c.vol)}<small>kg</small></div><div class="l">Volumen</div></div>
+      <div><div class="v" id="setCount">${c.done}<small>/${c.all}</small></div><div class="l">Sätze</div></div>
+      <button class="btn btn-p" data-action="finish-workout">Fertig</button>
+      <div class="bar"><i id="setBar" style="width:${c.all ? (c.done / c.all) * 100 : 0}%"></i></div>
     </div>
-
-    ${w.entries.map((entry) => renderEntry(w, entry)).join('')}
-
-    <div class="card">
-      <h3>Übung hinzufügen</h3>
-      ${available.length ? `<div class="chips">${available.map((e) =>
-        `<button class="chip" data-action="add-existing" data-id="${esc(e.id)}">${esc(e.name)}</button>`).join('')}</div>` : ''}
-      <form class="new-ex-form" data-form="new-exercise">
-        <input class="input" name="name" placeholder="Neue Übung, z.B. Bankdrücken" maxlength="80" autocomplete="off" required>
-        <div class="segmented" role="radiogroup" aria-label="Typ">
-          <label><input type="radio" name="type" value="weight" checked><span>Gewicht</span></label>
-          <label><input type="radio" name="type" value="bodyweight"><span>Körpergewicht</span></label>
+    <div class="wk">
+      <div class="wk-col">
+        ${w.entries.length ? w.entries.map((entry) => renderEntry(w, entry, focus, best)).join('') : '<div class="card muted">Wähle unten die erste Übung.</div>'}
+        <div class="card">
+          <h3 style="font-size:16px;font-weight:650">Übung hinzufügen</h3>
+          ${available.length ? `<div class="chips">${available.map((e) =>
+            `<button class="chip" data-action="add-existing" data-id="${esc(e.id)}">${esc(e.name)}</button>`).join('')}</div>` : ''}
+          <form class="new-ex" data-form="new-exercise">
+            <input class="input" name="name" placeholder="Neue Übung, z.B. Beinpresse" maxlength="80" autocomplete="off" aria-label="Name der neuen Übung" required>
+            <select class="input" name="type" aria-label="Art der Übung"><option value="weight">Gewicht</option><option value="bodyweight">Körpergewicht</option></select>
+            <button class="btn btn-s" type="submit">Hinzufügen</button>
+          </form>
         </div>
-        <button class="btn btn-secondary" type="submit">Hinzufügen</button>
-      </form>
-    </div>
-
-    <div class="workout-actions">
-      <button class="btn btn-primary btn-block" data-action="finish-workout">Training abschliessen</button>
-      <button class="btn btn-danger btn-block" data-action="delete-workout" data-id="${esc(w.id)}">Training löschen</button>
-    </div>
-  </section>`;
+        <div class="meta">
+          <input class="input" type="date" data-field="workout-date" value="${esc(w.date)}" max="${todayISO()}" aria-label="Datum">
+          <input class="input" data-field="workout-note" value="${esc(w.note)}" placeholder="Notiz, z.B. «müde»" maxlength="2000" aria-label="Notiz">
+        </div>
+        <button class="btn btn-d block" data-action="delete-workout" data-id="${esc(w.id)}">Training löschen</button>
+      </div>
+    </div>`;
 }
 
-function renderEntry(w, entry) {
+function renderEntry(w, entry, focus, best) {
   const ex = getExercise(entry.exerciseId);
   if (!ex) return '';
   const isBw = ex.type === 'bodyweight';
   const last = lastEntryFor(ex.id, w.id);
-  const lastText = last ? `Letztes Mal (${formatDate(last.workout.date, 'short')}): ${setsSummary(ex, last.entry)}` : '';
+  const done = entry.sets.filter((s, i) => isDone(w, entry, i)).length;
+  const hasPR = entry.sets.some((s, i) => isPR(ex, s, isDone(w, entry, i), best));
 
   return `
-  <div class="card entry" data-entry="${esc(entry.id)}">
-    <div class="entry-head">
-      <h3>${esc(ex.name)}</h3>
-      <span class="tag">${TYPE_LABELS[ex.type]}</span>
-      <button class="icon-btn" data-action="remove-entry" data-entry="${esc(entry.id)}" aria-label="Übung entfernen">${ICON_X}</button>
-    </div>
-    ${lastText ? `<p class="last-hint">${esc(lastText)}</p>` : ''}
-    ${isBw ? `<input class="input" data-field="entry-variant" data-entry="${esc(entry.id)}" value="${esc(entry.variant)}"
-        placeholder="Variante, z.B. Stufe 2 oder assistiert" maxlength="60">` : ''}
-    <div class="set-grid">
-      <div class="set-labels"><span></span><span>${isBw ? 'Zusatzgewicht (kg)' : 'Gewicht (kg)'}</span><span>Wdh.</span><span></span></div>
-      ${entry.sets.map((s, i) => renderSetRow(entry, s, i, isBw)).join('')}
-    </div>
-    <button class="btn btn-ghost btn-block" data-action="add-set" data-entry="${esc(entry.id)}">+ Satz hinzufügen</button>
-  </div>`;
+    <section class="card ex grid entry" data-entry="${esc(entry.id)}">
+      <div class="ex-h"><h3>${esc(ex.name)}</h3>${hasPR ? `<span class="badge">${ICON_STAR}REKORD</span>` : ''}<span class="ex-c">${done}/${entry.sets.length}</span>
+        <button class="x" data-action="remove-entry" data-entry="${esc(entry.id)}" aria-label="${esc(ex.name)} entfernen">${ICON_X}</button></div>
+      ${isBw ? `<div class="ex-variant"><input class="input" data-field="entry-variant" data-entry="${esc(entry.id)}" value="${esc(entry.variant)}"
+        placeholder="Variante, z.B. Stufe 2 oder assistiert" maxlength="60" aria-label="Variante"></div>` : ''}
+      <div>
+        <div class="labels"><span>Satz</span><span>Zuletzt</span><span>${isBw ? '+ kg' : 'kg'}</span><span>Wdh.</span><span></span></div>
+        ${entry.sets.map((s, i) => renderSetRow(w, entry, s, i, ex, last, focus, best)).join('')}
+      </div>
+      <button class="btn btn-g add-set" data-action="add-set" data-entry="${esc(entry.id)}">+ Satz hinzufügen</button>
+    </section>`;
 }
 
-function renderSetRow(entry, set, i, isBw) {
+function renderSetRow(w, entry, set, i, ex, last, focus, best) {
   const e = esc(entry.id);
+  const isBw = ex.type === 'bodyweight';
+  const done = isDone(w, entry, i);
+  const cur = focus && focus.entry === entry.id && focus.set === i;
+  const pr = isPR(ex, set, done, best);
+  const ps = last && last.entry.sets[i];
+  const prev = ps && ps.reps ? setText(ex, ps).replace(' Wdh.', '') : '–';
+  const a = `data-entry="${e}" data-set="${i}"`;
   return `
-    <div class="set-row" data-set="${i}">
-      <span class="set-no">${i + 1}</span>
-      <div class="stepper">
-        <button type="button" data-action="w-dec" data-entry="${e}" data-set="${i}" aria-label="Gewicht minus ${WEIGHT_STEP}">−</button>
-        <input class="num" data-field="set-weight" data-entry="${e}" data-set="${i}" inputmode="decimal" autocomplete="off"
-          value="${esc(fmtNum(set.weight))}" placeholder="${isBw ? '0' : 'kg'}" aria-label="Gewicht Satz ${i + 1}">
-        <button type="button" data-action="w-inc" data-entry="${e}" data-set="${i}" aria-label="Gewicht plus ${WEIGHT_STEP}">+</button>
-      </div>
-      <div class="num-box">
-        <input class="num" data-field="set-reps" data-entry="${e}" data-set="${i}" inputmode="numeric" pattern="[0-9]*" autocomplete="off"
+    <div class="set set-row ${done ? 'is-done' : ''} ${cur ? 'is-current' : ''} ${pr ? 'is-pr' : ''}" ${a}>
+      <div class="set-main">
+        <span class="set-no" title="${pr ? 'Neuer Rekord' : ''}">${pr ? `<span class="badge" style="padding:1px 3px">${ICON_STAR}</span>` : i + 1}</span>
+        <span class="set-prev">${esc(prev)}</span>
+        <input class="num" data-field="set-weight" ${a} inputmode="decimal" autocomplete="off"
+          value="${esc(fmtNum(set.weight))}" placeholder="${isBw ? '+0' : 'kg'}" aria-label="Gewicht Satz ${i + 1}">
+        <input class="num" data-field="set-reps" ${a} inputmode="numeric" pattern="[0-9]*" autocomplete="off"
           value="${esc(fmtNum(set.reps, 0))}" placeholder="–" aria-label="Wiederholungen Satz ${i + 1}">
+        <button class="check" data-action="set-done" ${a} aria-pressed="${done}" aria-label="Satz ${i + 1} ${done ? 'wieder öffnen' : 'bestätigen'}">${ICON_CHECK}</button>
       </div>
-      <button class="icon-btn" data-action="remove-set" data-entry="${e}" data-set="${i}" aria-label="Satz ${i + 1} entfernen">${ICON_X}</button>
+      <div class="set-tools">
+        <div class="nudge"><span>kg</span><button type="button" data-action="w-dec" ${a} aria-label="Gewicht minus ${WEIGHT_STEP}">−${WEIGHT_STEP}</button><button type="button" data-action="w-inc" ${a} aria-label="Gewicht plus ${WEIGHT_STEP}">+${WEIGHT_STEP}</button></div>
+        <div class="nudge"><span>Wdh.</span><button type="button" data-action="r-dec" ${a} aria-label="Eine Wiederholung weniger">−1</button><button type="button" data-action="r-inc" ${a} aria-label="Eine Wiederholung mehr">+1</button></div>
+        <button type="button" class="x set-del" data-action="remove-set" ${a} aria-label="Satz ${i + 1} entfernen" title="Satz entfernen">${ICON_X}</button>
+      </div>
     </div>`;
+}
+
+/** Kopfzeile des Trainings ohne Neuzeichnen aktualisieren (Fokus bleibt im Feld). */
+function refreshSession() {
+  const w = activeWorkout();
+  if (!w || !$('#vol')) return;
+  const c = sessionCounts(w);
+  $('#vol').innerHTML = `${thousand(c.vol)}<small>kg</small>`;
+  $('#setCount').innerHTML = `${c.done}<small>/${c.all}</small>`;
+  $('#setBar').style.width = (c.all ? (c.done / c.all) * 100 : 0) + '%';
 }
 
 /** Kurzform der Sätze, z.B. "60×8, 60×8, 62.5×6" oder "BW 12, +5 kg×8". */
@@ -784,32 +929,41 @@ function setsSummary(ex, entry) {
 }
 
 /* --- Verlauf --- */
+/** Anzahl Rekorde pro Training, chronologisch gezählt (nur Anzeige, nichts wird gespeichert). */
+function historicPRCounts() {
+  const best = {};
+  const counts = {};
+  [...state.data.workouts].sort((a, b) => a.date.localeCompare(b.date) || String(a.createdAt || '').localeCompare(String(b.createdAt || '')))
+    .forEach((w) => {
+      counts[w.id] = 0;
+      for (const en of w.entries) {
+        const ex = getExercise(en.exerciseId);
+        const vs = validSets(en);
+        if (!ex || !vs.length) continue;
+        const top = Math.max(...vs.map((s) => scoreOf(ex, s)));
+        if (best[ex.id] !== undefined && top > best[ex.id]) counts[w.id]++;
+        best[ex.id] = Math.max(best[ex.id] ?? 0, top);
+      }
+    });
+  return counts;
+}
+
 function renderHistory() {
   const workouts = sortedWorkouts();
-  let html = `
-  <section class="view">
-    <div class="view-head"><h1 class="view-title">Verlauf</h1><span class="view-sub">${workouts.length} Trainings</span></div>`;
+  const head = `<div class="head"><div><h1 class="title">Verlauf</h1><p class="sub">${workouts.length} ${workouts.length === 1 ? 'Training' : 'Trainings'}</p></div></div>`;
   if (!workouts.length) {
-    return html + '<div class="card"><p class="empty">Noch keine Trainings. Starte eines unter «Training».</p></div></section>';
+    return head + '<div class="card"><p class="empty">Noch keine Trainings. Starte eines unter «Training».</p></div>';
   }
-  // Nach Monat gruppieren
-  let currentMonth = '';
-  let group = [];
-  const flush = () => {
-    if (group.length) html += `<div class="card"><div class="list">${group.join('')}</div></div>`;
-    group = [];
-  };
+  const prs = historicPRCounts();
+  const groups = [];
   for (const w of workouts) {
-    const month = parseISODate(w.date).toLocaleDateString('de-CH', { month: 'long', year: 'numeric' });
-    if (month !== currentMonth) {
-      flush();
-      currentMonth = month;
-      html += `<h2 class="month-label">${esc(month)}</h2>`;
-    }
-    group.push(workoutListItem(w));
+    const m = parseISODate(w.date).toLocaleDateString('de-CH', { month: 'long', year: 'numeric' });
+    if (!groups.length || groups[groups.length - 1].m !== m) groups.push({ m, items: [] });
+    groups[groups.length - 1].items.push(w);
   }
-  flush();
-  return html + '</section>';
+  return head + groups.map((g) => `
+    <div class="month"><span class="eyebrow">${esc(g.m)}</span><span class="small muted tnum">${g.items.length} ${g.items.length === 1 ? 'Training' : 'Trainings'}</span></div>
+    <div class="card log">${g.items.map((w) => logRow(w, prs[w.id] || 0)).join('')}</div>`).join('');
 }
 
 /* --- Fortschritt --- */
@@ -824,106 +978,141 @@ function workoutsInRange() {
   return state.data.workouts.filter((w) => w.date >= start && w.entries.some((e) => validSets(e).length));
 }
 
+function periodStats(from, to) {
+  const ws = state.data.workouts.filter((w) => w.date >= from && w.date <= to && w.entries.some((e) => validSets(e).length));
+  let sets = 0, vol = 0;
+  ws.forEach((w) => w.entries.forEach((e) => validSets(e).forEach((s) => { sets++; vol += (s.weight || 0) * s.reps; })));
+  return { days: new Set(ws.map((w) => w.date)).size, sets, vol };
+}
+
 function renderStats() {
+  const r = RANGES[state.prefs.range] || RANGES['3m'];
   const inRange = workoutsInRange();
   const days = new Set(inRange.map((w) => w.date));
-  const sets = inRange.reduce((s, w) => s + w.entries.reduce((a, e) => a + validSets(e).length, 0), 0);
 
   // Durchschnitt pro Woche
-  const r = RANGES[state.prefs.range];
   let spanDays = r.days;
   if (!spanDays) {
     const first = [...days].sort()[0];
     spanDays = first ? Math.max(28, Math.round((parseISODate(todayISO()) - parseISODate(first)) / 86400000) + 1) : 7;
   }
   const perWeek = days.size / (spanDays / 7);
+  const cur = periodStats(rangeStartISO(), todayISO());
+  const prev = r.days
+    ? periodStats(toISODate(addDays(parseISODate(rangeStartISO()), -r.days)), toISODate(addDays(parseISODate(rangeStartISO()), -1)))
+    : null;
+  const delta = (a, b, f = (x) => x) => (prev ? `<div class="d">${a - b >= 0 ? '+' : '−'}${f(Math.abs(a - b))} zur Vorperiode</div>` : '');
 
   const exercises = exercisesByRecency().filter((e) => exerciseUseCount(e.id) > 0);
   if (!state.statsExerciseId || !exercises.some((e) => e.id === state.statsExerciseId)) {
     state.statsExerciseId = exercises[0] ? exercises[0].id : null;
   }
   const ex = state.statsExerciseId ? getExercise(state.statsExerciseId) : null;
-  const bwSorted = [...state.data.bodyweight].sort((a, b) => b.date.localeCompare(a.date));
+  const isBw = ex && ex.type === 'bodyweight';
+  const unit = isBw ? 'Wdh.' : 'kg';
+  const series = ex ? exerciseSeries(ex) : [];
+  const lastP = series.length ? series[series.length - 1] : null;
+  const change = series.length > 1 ? lastP.primary - series[0].primary : null;
+
+  // Bestwerte pro Übung (über alle Trainings)
+  const bests = exercises.map((e) => {
+    let top = null;
+    for (const w of state.data.workouts) for (const en of w.entries) if (en.exerciseId === e.id) {
+      for (const s of validSets(en)) if (!top || scoreOf(e, s) > scoreOf(e, top.s)) top = { s, date: w.date };
+    }
+    return { e, top };
+  }).filter((b) => b.top);
+
+  const bwAll = [...state.data.bodyweight].sort((a, b) => b.date.localeCompare(a.date));
+  const bwInRange = bwAll.filter((b) => b.date >= rangeStartISO());
 
   return `
-  <section class="view">
-    <div class="view-head"><h1 class="view-title">Fortschritt</h1></div>
-    <div class="segmented" role="group" aria-label="Zeitraum">
-      ${Object.entries(RANGES).map(([key, v]) =>
-        `<button data-action="set-range" data-range="${key}" aria-pressed="${state.prefs.range === key}">${v.label}</button>`).join('')}
+    <div class="head"><div><h1 class="title">Fortschritt</h1></div>
+      <div class="seg" role="group" aria-label="Zeitraum">${Object.entries(RANGES).map(([key, v]) =>
+        `<button data-action="set-range" data-range="${key}" aria-pressed="${state.prefs.range === key}">${v.label}</button>`).join('')}</div></div>
+    <div class="stats">
+      <div class="stat"><div class="v">${days.size}</div><div class="l">Trainingstage</div>${delta(cur.days, prev && prev.days)}</div>
+      <div class="stat"><div class="v">${fmtNum(perWeek, 1)}</div><div class="l">pro Woche</div>${prev ? `<div class="d">Vorperiode ${fmtNum(prev.days / (spanDays / 7), 1)}</div>` : ''}</div>
+      <div class="stat"><div class="v">${thousand(cur.sets)}</div><div class="l">Sätze</div>${delta(cur.sets, prev && prev.sets)}</div>
+      <div class="stat"><div class="v">${fmtNum(cur.vol / 1000, 1)} t</div><div class="l">Volumen</div>${delta(cur.vol, prev && prev.vol, (x) => fmtNum(x / 1000, 1) + ' t')}</div>
     </div>
-    <div class="kpis">
-      <div class="kpi"><div class="kpi-value">${days.size}</div><div class="kpi-label">Trainingstage</div></div>
-      <div class="kpi"><div class="kpi-value">${fmtNum(perWeek, 1)}</div><div class="kpi-label">pro Woche</div></div>
-      <div class="kpi"><div class="kpi-value">${sets}</div><div class="kpi-label">Sätze</div></div>
-    </div>
-
-    <div class="stats-grid">
-      <div class="card span-2">
-        <div class="card-head"><h2>Übung</h2></div>
+    <div class="st-grid">
+      <div class="card span2">
         ${exercises.length ? `
-          <select class="select" data-field="stats-exercise" aria-label="Übung wählen">
-            ${exercises.map((e) => `<option value="${esc(e.id)}" ${e.id === state.statsExerciseId ? 'selected' : ''}>${esc(e.name)}</option>`).join('')}
-          </select>
-          <div class="best" id="exBest"></div>
-          <div class="chart-box"><canvas id="exChart" aria-label="Fortschritt der Übung"></canvas></div>
-          <p class="chart-note">${ex && ex.type === 'bodyweight'
-            ? 'Linie: meiste Wiederholungen in einem Satz pro Tag. Gestrichelt: Wiederholungen total.'
-            : 'Linie: geschätztes 1RM (Epley: Gewicht × (1 + Wdh. / 30)), bester Satz pro Tag. Gestrichelt: schwerstes Gewicht.'}</p>`
+          <div class="chips-scroll" role="group" aria-label="Übung wählen">${exercises.map((e) =>
+            `<button class="chip" data-action="stats-ex" data-id="${esc(e.id)}" aria-pressed="${e.id === state.statsExerciseId}">${esc(e.name)}</button>`).join('')}</div>
+          ${series.length ? `
+            <div class="hero" id="exBest">
+              <div><div class="eyebrow">${isBw ? 'Meiste Wiederholungen im Satz' : 'Geschätztes 1RM'}</div><div class="big">${fmtNum(lastP.primary, 1)}<small>${unit}</small></div></div>
+              ${change !== null ? `<div class="delta ${change < 0 ? 'down' : ''}">${change >= 0 ? '+' : '−'}${fmtNum(Math.abs(change), 1)} ${unit} seit ${esc(formatDate(toISODate(new Date(series[0].x)), 'short'))}</div>` : ''}
+            </div>
+            <div class="legend"><span><i></i>${isBw ? 'Max. Wdh.' : 'Geschätztes 1RM'}</span><span><i class="dash"></i>${isBw ? 'Wdh. total' : 'Schwerstes Gewicht'}</span></div>
+            <div class="chart"><canvas id="exChart" role="img" aria-label="Verlauf ${esc(ex.name)}"></canvas></div>
+            <details class="tbl"><summary>Als Tabelle anzeigen</summary><div class="tbl-wrap"><table><thead><tr><th>Datum</th><th>${isBw ? 'Max. Wdh.' : '1RM (kg)'}</th><th>${isBw ? 'Total' : 'Schwerstes (kg)'}</th></tr></thead><tbody>
+              ${[...series].reverse().map((p) => `<tr><td>${esc(formatDate(toISODate(new Date(p.x)), 'short'))}</td><td>${fmtNum(p.primary, 1)}</td><td>${fmtNum(p.secondary, 1)}</td></tr>`).join('')}</tbody></table></div></details>
+            <p class="small muted">${isBw
+              ? 'Linie: meiste Wiederholungen in einem Satz pro Tag. Gestrichelt: Wiederholungen total.'
+              : 'Linie: geschätztes 1RM (Epley: Gewicht × (1 + Wdh. / 30)), bester Satz pro Tag. Gestrichelt: schwerstes Gewicht.'}</p>`
+          : `<div id="exBest"></div><p class="muted">Keine Sätze im Zeitraum «${esc(r.label)}».</p>`}`
         : '<p class="empty">Sobald du Sätze mit Wiederholungen einträgst, erscheint hier deine Kurve.</p>'}
       </div>
-
       <div class="card">
-        <div class="card-head"><h2>Trainingstage</h2></div>
-        <div class="heatmap-wrap" id="heatmapWrap"></div>
-        <div class="hm-legend">weniger
-          <span class="hm-cell" data-l="0"></span><span class="hm-cell" data-l="1"></span><span class="hm-cell" data-l="2"></span>
-          <span class="hm-cell" data-l="3"></span><span class="hm-cell" data-l="4"></span> mehr Sätze</div>
+        <div class="eyebrow">Trainingstage</div>
+        <div class="hm-wrap" id="heatmapWrap"></div>
+        <div class="hm-leg">weniger <span class="cell" data-l="0"></span><span class="cell" data-l="1"></span><span class="cell" data-l="2"></span><span class="cell" data-l="3"></span><span class="cell" data-l="4"></span> mehr Sätze</div>
       </div>
-
-      <div class="card">
-        <div class="card-head"><h2>Körpergewicht</h2></div>
+      ${bests.length ? `<div class="card">
+        <div class="eyebrow">Bestwerte</div>
+        <div>${bests.map((b) => `<button class="pr-row" data-action="stats-ex" data-id="${esc(b.e.id)}"><b>${esc(b.e.name)}</b><span class="kg">${esc(setText(b.e, b.top.s))}</span><small>${esc(formatDate(b.top.date, 'short'))}${b.e.type === 'bodyweight' ? '' : ` · 1RM ${fmtNum(e1rmOf(b.top.s), 1)} kg`}</small></button>`).join('')}</div>
+      </div>` : ''}
+      <div class="card span2">
+        <div class="hero"><div><div class="eyebrow">Körpergewicht</div><div class="big">${bwAll.length ? esc(fmtNum(bwAll[0].kg, 1)) : '–'}<small>kg</small></div></div></div>
         <form class="bw-form" data-form="bodyweight">
-          <input class="input" type="date" name="date" value="${todayISO()}" max="${todayISO()}" aria-label="Datum">
-          <input class="input num-tab" name="kg" inputmode="decimal" placeholder="kg, z.B. 78.5" aria-label="Körpergewicht in kg" required>
-          <button class="btn btn-primary" type="submit">Speichern</button>
+          <input class="input tnum" type="date" name="date" value="${todayISO()}" max="${todayISO()}" aria-label="Datum">
+          <input class="input tnum" name="kg" inputmode="decimal" placeholder="kg heute" aria-label="Körpergewicht in kg" required>
+          <button class="btn btn-s" type="submit">Speichern</button>
         </form>
-        ${state.data.bodyweight.length
-          ? `<div class="chart-box"><canvas id="bwChart" aria-label="Körpergewicht"></canvas></div>
-             <div class="list bw-list">${bwSorted.slice(0, 5).map((b) => `
-               <div class="list-item">
-                 <span class="grow">${esc(formatDate(b.date, 'weekday'))}</span>
-                 <span class="num-tab"><strong>${esc(fmtNum(b.kg, 1))}</strong> kg</span>
-                 <button class="icon-btn" data-action="bw-delete" data-id="${esc(b.id)}" aria-label="Eintrag löschen">${ICON_X}</button>
-               </div>`).join('')}</div>`
-          : '<p class="empty">Noch keine Einträge.</p>'}
+        ${bwInRange.length
+          ? '<div class="chart chart-bw"><canvas id="bwChart" role="img" aria-label="Körpergewicht"></canvas></div>'
+          : `<p class="muted">${bwAll.length ? `Keine Einträge im Zeitraum «${esc(r.label)}».` : 'Noch keine Einträge.'}</p>`}
+        ${bwAll.length ? `<div class="bw-list">${bwAll.slice(0, 5).map((b) => `
+          <div class="side-row"><span>${esc(formatDate(b.date, 'weekday'))}</span><b>${esc(fmtNum(b.kg, 1))} kg</b>
+            <button class="x" data-action="bw-delete" data-id="${esc(b.id)}" aria-label="Eintrag löschen">${ICON_X}</button></div>`).join('')}</div>` : ''}
       </div>
-    </div>
-  </section>`;
+    </div>`;
 }
 
 /* --- Mehr / Einstellungen --- */
 function renderSettings() {
   const exercises = [...state.data.exercises].sort((a, b) => a.name.localeCompare(b.name, 'de'));
   const lastSync = state.meta.lastSyncedAt ? new Date(state.meta.lastSyncedAt).toLocaleString('de-CH') : '–';
+  const palette = state.prefs.palette || 'stahl';
 
   return `
-  <section class="view">
-    <div class="view-head"><h1 class="view-title">Mehr</h1></div>
+    <div class="head"><div><h1 class="title">Mehr</h1></div></div>
 
     <div class="card">
       <h2>Dein Link</h2>
       <p class="small muted">Mit diesem Link öffnest du deine Daten auf Handy und PC. Nicht teilen – wer ihn hat, sieht und ändert deine Daten.</p>
       <div class="link-box" id="linkBox">${esc(personalLink())}</div>
-      <button class="btn btn-secondary" data-action="copy-link">Link kopieren</button>
+      <button class="btn btn-s" data-action="copy-link">Link kopieren</button>
     </div>
 
     <div class="card">
       <div class="card-head"><h2>Sync</h2><span class="small muted" id="syncStatusText">${SYNC_LABELS[state.sync.status]}</span></div>
       ${state.sync.configured
         ? `<p class="small muted">Zuletzt synchronisiert: ${esc(lastSync)}</p>
-           <button class="btn btn-secondary" data-action="sync-now">Jetzt synchronisieren</button>`
+           <button class="btn btn-s" data-action="sync-now">Jetzt synchronisieren</button>`
         : '<p class="small muted">In config.js sind noch keine Supabase-Daten eingetragen. Die App speichert deshalb nur in diesem Browser. Anleitung: SETUP.md.</p>'}
+    </div>
+
+    <div class="card">
+      <h2>Backup</h2>
+      <p class="small muted">Exportiert alle Trainings, Übungen und Körpergewichte als JSON-Datei. Beim Import werden die aktuellen Daten ersetzt.</p>
+      <div class="row-2">
+        <button class="btn btn-s" data-action="export">Exportieren</button>
+        <button class="btn btn-s" data-action="import">Importieren</button>
+      </div>
     </div>
 
     <div class="card">
@@ -932,41 +1121,44 @@ function renderSettings() {
         <div class="ex-row">
           <div class="ex-row-top">
             <span class="grow">${esc(e.name)}</span>
-            <span class="small muted">${exerciseUseCount(e.id)}×</span>
+            <span class="small muted tnum">${exerciseUseCount(e.id)}×</span>
           </div>
           <div class="ex-row-actions">
-            <select class="select" data-field="ex-type" data-id="${esc(e.id)}" aria-label="Typ von ${esc(e.name)}">
+            <select class="input" data-field="ex-type" data-id="${esc(e.id)}" aria-label="Typ von ${esc(e.name)}">
               <option value="weight" ${e.type === 'weight' ? 'selected' : ''}>Gewicht</option>
               <option value="bodyweight" ${e.type === 'bodyweight' ? 'selected' : ''}>Körpergewicht</option>
             </select>
-            <button class="btn btn-secondary btn-sm" data-action="ex-rename" data-id="${esc(e.id)}">Umbenennen</button>
-            <button class="btn btn-danger btn-sm" data-action="ex-delete" data-id="${esc(e.id)}">Löschen</button>
+            <button class="btn btn-s btn-sm" data-action="ex-rename" data-id="${esc(e.id)}">Umbenennen</button>
+            <button class="btn btn-d btn-sm" data-action="ex-delete" data-id="${esc(e.id)}">Löschen</button>
           </div>
         </div>`).join('')}</div>`
       : '<p class="empty">Noch keine Übungen. Du legst sie beim Training an.</p>'}
     </div>
 
     <div class="card">
-      <h2>Backup</h2>
-      <p class="small muted">Exportiert alle Trainings, Übungen und Körpergewichte als JSON-Datei. Beim Import werden die aktuellen Daten ersetzt.</p>
-      <div class="row-2">
-        <button class="btn btn-secondary" data-action="export">Exportieren</button>
-        <button class="btn btn-secondary" data-action="import">Importieren</button>
-      </div>
-    </div>
-
-    <div class="card">
       <h2>Darstellung</h2>
-      <div class="segmented" role="group" aria-label="Design">
-        ${[['dark', 'Dunkel'], ['light', 'Hell'], ['system', 'System']].map(([k, l]) =>
+      <div class="seg" role="group" aria-label="Hell oder dunkel">
+        ${[['system', 'Auto'], ['light', 'Hell'], ['dark', 'Dunkel']].map(([k, l]) =>
           `<button data-action="set-theme" data-theme="${k}" aria-pressed="${state.prefs.theme === k}">${l}</button>`).join('')}
       </div>
     </div>
-  </section>`;
+    <div class="eyebrow">Farbwelten</div>
+    <div class="tiles">${PALETTES.map(([k, n, d]) => `
+      <button class="tile" data-action="set-palette" data-palette="${k}" aria-pressed="${palette === k}">
+        <div class="tile-prev">
+          <div class="tile-set d"><em>1</em><span>62.5 kg</span><span>8 Wdh.</span><u></u></div>
+          <div class="tile-set o"><em>2</em><span>65 kg</span><span>8 Wdh.</span><u></u></div>
+          <svg class="tile-spark" viewBox="0 0 200 34" preserveAspectRatio="none" aria-hidden="true"><path d="M0 28L30 25L60 26L90 19L120 17L150 12L200 5V34H0Z" fill="var(--accent-soft)"/><path d="M0 28L30 25L60 26L90 19L120 17L150 12L200 5" fill="none" stroke="var(--accent)" stroke-width="2" vector-effect="non-scaling-stroke"/></svg>
+          <span class="tile-btn">Satz bestätigen</span>
+        </div>
+        <div class="tile-info"><b>${esc(n)}</b><span>${esc(d)}</span></div>
+      </button>`).join('')}</div>`;
 }
 
 /* ---------------------------------------------------------------------
    7. Diagramme & Heatmap
+   Chart.js, gestaltet wie im Redesign: eine y-Achse, feines Raster,
+   Fläche unter der Hauptlinie, Bestwert markiert, letzter Punkt sichtbar.
    --------------------------------------------------------------------- */
 function destroyCharts() {
   Object.values(state.charts).forEach((c) => c && c.destroy());
@@ -976,7 +1168,7 @@ function destroyCharts() {
 function drawStats() {
   drawHeatmap();
   if (!window.Chart) {
-    document.querySelectorAll('.chart-box').forEach((b) => {
+    document.querySelectorAll('.chart').forEach((b) => {
       b.outerHTML = '<p class="empty">Diagramme konnten nicht geladen werden (offline?).</p>';
     });
     return;
@@ -985,14 +1177,22 @@ function drawStats() {
   drawBodyweightChart();
 }
 
+/** "rgb(r, g, b)" → "rgba(r, g, b, a)". */
+function withAlpha(color, a) {
+  const m = String(color).match(/[\d.]+/g);
+  return m && m.length >= 3 ? `rgba(${m[0]}, ${m[1]}, ${m[2]}, ${a})` : color;
+}
+
 /** Gemeinsame Chart.js-Optionen (Farben aus den CSS-Tokens). */
-function baseChartOptions(unit) {
-  const grid = cssVar('--border');
+function baseChartOptions(unit, width) {
+  const grid = cssVar('--line');
   const text = cssVar('--text-3');
+  const font = { family: cssFont(), size: 11.5, weight: 500 };
   return {
     responsive: true,
     maintainAspectRatio: false,
     animation: false,
+    layout: { padding: { top: 22, right: 10 } },
     interaction: { mode: 'nearest', axis: 'x', intersect: false },
     plugins: {
       legend: { display: false },
@@ -1002,7 +1202,10 @@ function baseChartOptions(unit) {
         borderWidth: 1,
         titleColor: cssVar('--text'),
         bodyColor: cssVar('--text-2'),
-        padding: 10,
+        titleFont: { family: font.family, size: 12.5, weight: 650 },
+        bodyFont: { family: font.family, size: 12.5 },
+        padding: { x: 10, y: 7 },
+        cornerRadius: 9,
         displayColors: false,
         callbacks: {
           title: (items) => (items.length ? formatDate(toISODate(new Date(items[0].parsed.x)), 'weekday') : ''),
@@ -1014,16 +1217,16 @@ function baseChartOptions(unit) {
       x: {
         type: 'linear',
         grid: { display: false },
-        border: { color: grid },
+        border: { display: false },
         ticks: {
-          color: text, maxRotation: 0, autoSkip: true, maxTicksLimit: 5,
+          color: text, font, maxRotation: 0, autoSkip: true, maxTicksLimit: width < 420 ? 3 : 5,
           callback: (v) => new Date(v).toLocaleDateString('de-CH', { day: 'numeric', month: 'short' }),
         },
       },
       y: {
         grid: { color: grid },
         border: { display: false },
-        ticks: { color: text, maxTicksLimit: 5, callback: (v) => fmtNum(v, 1) },
+        ticks: { color: text, font, maxTicksLimit: 5, callback: (v) => fmtNum(v, 1) },
       },
     },
   };
@@ -1035,6 +1238,58 @@ function fitXAxis(options, points) {
     options.scales.x.min = points[0].x - 3 * 86400000;
     options.scales.x.max = points[0].x + 3 * 86400000;
   }
+}
+
+/** Hauptlinie im Redesign-Stil: Fläche mit Verlauf, Punkt nur beim Bestwert (Raute) und beim letzten Wert. */
+function mainDataset(label, points, accent) {
+  const pr = cssVar('--pr');
+  const surface = cssVar('--surface');
+  let topIdx = 0;
+  points.forEach((p, i) => { if (p.y >= points[topIdx].y) topIdx = i; });
+  const lastIdx = points.length - 1;
+  const showTop = points.length > 1;
+  return {
+    topIdx: showTop ? topIdx : -1,
+    dataset: {
+      label, data: points,
+      borderColor: accent, borderWidth: 2, tension: 0, borderJoinStyle: 'round', borderCapStyle: 'round',
+      fill: 'start',
+      backgroundColor: (ctx) => {
+        const area = ctx.chart.chartArea;
+        if (!area) return withAlpha(accent, 0.12);
+        const g = ctx.chart.ctx.createLinearGradient(0, area.top, 0, area.bottom);
+        g.addColorStop(0, withAlpha(accent, 0.24));
+        g.addColorStop(1, withAlpha(accent, 0));
+        return g;
+      },
+      pointRadius: points.map((p, i) => (showTop && i === topIdx ? 6 : i === lastIdx ? 4.5 : 0)),
+      pointStyle: points.map((p, i) => (showTop && i === topIdx ? 'rectRot' : 'circle')),
+      pointBackgroundColor: points.map((p, i) => (showTop && i === topIdx ? pr : accent)),
+      pointBorderColor: surface, pointBorderWidth: 2,
+      pointHoverRadius: 5, pointHoverBackgroundColor: accent, pointHoverBorderColor: surface, pointHoverBorderWidth: 2,
+    },
+  };
+}
+
+/** Beschriftung «Bestwert …» neben der Raute. */
+function bestLabelPlugin(topIdx) {
+  return {
+    id: 'bestLabel',
+    afterDatasetsDraw(chart) {
+      if (topIdx < 0) return;
+      const el = chart.getDatasetMeta(0).data[topIdx];
+      const value = chart.data.datasets[0].data[topIdx];
+      if (!el || !value) return;
+      const c = chart.ctx;
+      const near = el.x > chart.width - 90;
+      c.save();
+      c.font = `650 11.5px ${cssFont()}`;
+      c.fillStyle = cssVar('--text-2');
+      c.textAlign = near ? 'right' : 'left';
+      c.fillText(`Bestwert ${fmtNum(value.y, 1)}`, near ? el.x - 10 : el.x + 10, Math.max(12, el.y - 8));
+      c.restore();
+    },
+  };
 }
 
 /**
@@ -1077,48 +1332,30 @@ function drawExerciseChart() {
 
   const isBw = ex.type === 'bodyweight';
   const series = exerciseSeries(ex);
+  if (!series.length) return;
   const unit = isBw ? 'Wdh.' : 'kg';
   const primaryLabel = isBw ? 'Max. Wdh.' : 'Geschätztes 1RM';
   const secondaryLabel = isBw ? 'Wdh. total' : 'Schwerstes Gewicht';
 
-  const best = $('#exBest');
-  if (!series.length) {
-    best.innerHTML = '';
-    canvas.parentElement.outerHTML = `<p class="empty">Keine Sätze im Zeitraum «${RANGES[state.prefs.range].label}».</p>`;
-    return;
-  }
-  const top = series.reduce((a, b) => (b.primary > a.primary ? b : a));
-  const first = series[0].primary;
-  const lastVal = series[series.length - 1].primary;
-  const change = lastVal - first;
-  best.innerHTML = `
-    <span class="legend-line"><i></i>${primaryLabel}</span>
-    <span class="legend-line"><i class="dashed"></i>${secondaryLabel}</span>
-    <span>Bestwert: <strong>${fmtNum(top.primary, 1)} ${unit}</strong></span>
-    ${series.length > 1 ? `<span>Veränderung: <strong>${change >= 0 ? '+' : ''}${fmtNum(change, 1)} ${unit}</strong></span>` : ''}`;
-
   const accent = cssVar('--accent');
-  const options = baseChartOptions(unit);
+  const options = baseChartOptions(unit, canvas.parentElement.clientWidth);
   fitXAxis(options, series);
+  const main = mainDataset(primaryLabel, series.map((p) => ({ x: p.x, y: p.primary })), accent);
   state.charts.exercise = new Chart(canvas, {
     type: 'line',
     data: {
       datasets: [
-        {
-          label: primaryLabel,
-          data: series.map((p) => ({ x: p.x, y: p.primary })),
-          borderColor: accent, backgroundColor: accent,
-          borderWidth: 2.5, pointRadius: 3, pointHoverRadius: 5, tension: 0.25,
-        },
+        main.dataset,
         {
           label: secondaryLabel,
           data: series.map((p) => ({ x: p.x, y: p.secondary })),
           borderColor: cssVar('--text-3'), backgroundColor: cssVar('--text-3'),
-          borderWidth: 1.5, borderDash: [5, 4], pointRadius: 0, pointHoverRadius: 3, tension: 0.25,
+          borderWidth: 1.5, borderDash: [5, 4], pointRadius: 0, pointHoverRadius: 0, tension: 0, fill: false,
         },
       ],
     },
     options,
+    plugins: [bestLabelPlugin(main.topIdx)],
   });
 }
 
@@ -1130,23 +1367,16 @@ function drawBodyweightChart() {
     .filter((b) => b.date >= start)
     .sort((a, b) => a.date.localeCompare(b.date))
     .map((b) => ({ x: parseISODate(b.date).getTime(), y: b.kg }));
-  if (!points.length) {
-    canvas.parentElement.outerHTML = `<p class="empty">Keine Einträge im Zeitraum «${RANGES[state.prefs.range].label}».</p>`;
-    return;
-  }
+  if (!points.length) return;
   const accent = cssVar('--accent');
-  const options = baseChartOptions('kg');
+  const options = baseChartOptions('kg', canvas.parentElement.clientWidth);
   fitXAxis(options, points);
+  const main = mainDataset('Körpergewicht', points, accent);
   state.charts.bodyweight = new Chart(canvas, {
     type: 'line',
-    data: {
-      datasets: [{
-        label: 'Körpergewicht', data: points,
-        borderColor: accent, backgroundColor: accent,
-        borderWidth: 2.5, pointRadius: 3, pointHoverRadius: 5, tension: 0.25,
-      }],
-    },
+    data: { datasets: [main.dataset] },
     options,
+    plugins: [bestLabelPlugin(main.topIdx)],
   });
 }
 
@@ -1165,7 +1395,7 @@ function drawHeatmap() {
   // Startdatum: Zeitraum-Beginn (bei "Alles" erstes Training, mind. 12 Wochen), auf Montag zurück
   const today = parseISODate(todayISO());
   let start;
-  const r = RANGES[state.prefs.range];
+  const r = RANGES[state.prefs.range] || RANGES['3m'];
   if (r.days) start = addDays(today, -(r.days - 1));
   else {
     const first = Object.keys(setsByDay).sort()[0];
@@ -1176,34 +1406,62 @@ function drawHeatmap() {
   const weeks = Math.ceil((Math.round((today - start) / 86400000) + 1) / 7);
 
   // Zellgrösse an die verfügbare Breite anpassen (zu viele Wochen → horizontal scrollen im Kasten)
-  const labelW = 22;
-  const gap = 3;
-  const avail = wrap.clientWidth - labelW - gap;
-  const cell = Math.max(11, Math.min(26, Math.floor(avail / weeks) - gap));
+  const avail = wrap.clientWidth - 25;
+  const cell = Math.max(11, Math.min(24, Math.floor(avail / weeks) - 3));
 
   const level = (n) => (!n ? 0 : n < 8 ? 1 : n < 15 ? 2 : n < 22 ? 3 : 4);
   const todayIso = todayISO();
-  const dayLabels = ['Mo', '', 'Mi', '', 'Fr', '', ''];
-  let html = `<div class="heatmap" style="--cell:${cell}px; grid-template-columns:${labelW}px">`;
-  html += '<span></span>' + dayLabels.map((l) => `<span class="hm-label">${l}</span>`).join('');
+  let html = `<div class="hm" style="--c:${cell}px;grid-template-columns:22px"><span></span>`
+    + ['Mo', '', 'Mi', '', 'Fr', '', ''].map((l) => `<span>${l}</span>`).join('');
 
   let lastMonth = -1;
   for (let wk = 0; wk < weeks; wk++) {
     const monday = addDays(start, wk * 7);
     const showMonth = monday.getMonth() !== lastMonth && (cell >= 14 || wk % 2 === 0 || wk === 0);
-    html += `<span class="hm-month">${showMonth ? monday.toLocaleDateString('de-CH', { month: 'short' }) : ''}</span>`;
+    html += `<span class="m">${showMonth ? monday.toLocaleDateString('de-CH', { month: 'short' }).replace('.', '') : ''}</span>`;
     if (showMonth) lastMonth = monday.getMonth();
     for (let d = 0; d < 7; d++) {
       const iso = toISODate(addDays(monday, d));
       const n = setsByDay[iso] || 0;
       const cls = iso > todayIso ? ' future' : iso === todayIso ? ' today' : '';
       const title = iso > todayIso ? '' : `${formatDate(iso, 'weekday')}: ${n ? n + ' Sätze' : 'kein Training'}`;
-      html += `<span class="hm-cell${cls}" data-l="${level(n)}" title="${esc(title)}"></span>`;
+      html += `<div class="cell${cls}" data-l="${level(n)}" title="${esc(title)}"></div>`;
     }
   }
   html += '</div>';
   wrap.innerHTML = html;
   wrap.scrollLeft = wrap.scrollWidth; // neueste Wochen sichtbar
+}
+
+/* --- Pausen-Timer (rechnet mit Endzeit, läuft also auch bei kurz gesperrtem Handy weiter) --- */
+const rest = { end: 0, total: 90, label: '' };
+function startRest(sec, label) {
+  rest.end = Date.now() + sec * 1000;
+  rest.total = sec;
+  rest.label = label;
+  $('#rest').hidden = false;
+  tick();
+}
+function hideRest() { const r = $('#rest'); if (r) r.hidden = true; }
+function restSecondsFor(ex) { return /kniebeuge|kreuzheben|squat|deadlift/i.test(ex.name) ? 150 : 90; }
+
+function tick() {
+  if (!state.data) return;
+  const w = activeWorkout();
+  const dur = $('#dur');
+  if (w && dur) {
+    const started = Date.parse(w.createdAt || '');
+    const mins = Math.floor((Date.now() - started) / 60000);
+    // Dauer nur für heute gestartete Trainings (alte Trainings aus dem Verlauf zeigen «–»)
+    dur.textContent = Number.isFinite(mins) && mins >= 0 && mins < 12 * 60 && w.date === todayISO()
+      ? `${Math.floor(mins / 60)}:${String(mins % 60).padStart(2, '0')}` : '–';
+  }
+  const box = $('#rest');
+  if (!box || box.hidden) return;
+  const left = Math.max(0, Math.ceil((rest.end - Date.now()) / 1000));
+  $('#restTime').textContent = `${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`;
+  $('#restLabel').textContent = left ? `Pause nach ${rest.label}` : 'Bereit für den nächsten Satz';
+  $('#restBar').style.width = (rest.total ? (left / rest.total) * 100 : 0) + '%';
 }
 
 /* ---------------------------------------------------------------------
@@ -1229,13 +1487,20 @@ const actions = {
 
   'open-workout': (el) => {
     state.meta.activeWorkoutId = el.dataset.id;
+    state.meta.doneSets = {}; // Haken-Stand wird aus den eingetragenen Sätzen neu aufgebaut
+    state.focus = null;
+    state.summary = null;
     saveCache();
     setView('training');
   },
 
   'finish-workout': () => {
     const w = activeWorkout();
+    state.summary = w && w.entries.length ? workoutSummary(w) : null;
     state.meta.activeWorkoutId = null;
+    state.meta.doneSets = {};
+    state.focus = null;
+    hideRest();
     if (w && w.entries.length === 0) {
       // Leere Trainings nicht aufbewahren
       state.data.workouts = state.data.workouts.filter((x) => x.id !== w.id);
@@ -1245,12 +1510,16 @@ const actions = {
       if (w) toast('Training gespeichert');
     }
     render();
+    window.scrollTo(0, 0);
   },
 
   'delete-workout': (el) => {
     if (!confirm('Dieses Training wirklich löschen?')) return;
     state.data.workouts = state.data.workouts.filter((w) => w.id !== el.dataset.id);
     state.meta.activeWorkoutId = null;
+    state.meta.doneSets = {};
+    state.focus = null;
+    hideRest();
     commit();
     toast('Training gelöscht');
     render();
@@ -1261,6 +1530,7 @@ const actions = {
     const ex = getExercise(el.dataset.id);
     if (!w || !ex) return;
     addEntry(w, ex);
+    state.focus = { entry: w.entries[w.entries.length - 1].id, set: 0 };
     commit();
     render();
     const lastEntry = w.entries[w.entries.length - 1];
@@ -1283,6 +1553,7 @@ const actions = {
     if (!entry) return;
     const last = entry.sets[entry.sets.length - 1];
     entry.sets.push(last ? { weight: last.weight, reps: last.reps } : { weight: null, reps: null });
+    state.focus = { entry: entry.id, set: entry.sets.length - 1 };
     commit();
     render();
     focusField(`[data-field="set-reps"][data-entry="${CSS.escape(entry.id)}"][data-set="${entry.sets.length - 1}"]`);
@@ -1292,12 +1563,55 @@ const actions = {
     const entry = findEntry(el.dataset.entry);
     if (!entry) return;
     entry.sets.splice(Number(el.dataset.set), 1);
+    const w = activeWorkout();
+    const marks = w && doneMap(w)[entry.id];
+    if (marks) marks.splice(Number(el.dataset.set), 1);
+    state.focus = null;
     commit();
     render();
   },
 
   'w-inc': (el) => stepWeight(el, +WEIGHT_STEP),
   'w-dec': (el) => stepWeight(el, -WEIGHT_STEP),
+  'r-inc': (el) => stepReps(el, +1),
+  'r-dec': (el) => stepReps(el, -1),
+
+  /* Haken: Satz bestätigen / wieder öffnen (nur lokal), startet den Pausen-Timer */
+  'set-done': (el) => {
+    const w = activeWorkout();
+    const entry = findEntry(el.dataset.entry);
+    const i = Number(el.dataset.set);
+    if (!w || !entry || !entry.sets[i]) return;
+    const ex = getExercise(entry.exerciseId);
+    const done = !isDone(w, entry, i);
+    setDone(w, entry, i, done);
+    state.focus = null;
+    saveCache();
+    if (done && ex) {
+      const set = entry.sets[i];
+      if (isPR(ex, set, true, bestScores(w.id))) toast(`Neuer Rekord: ${ex.name} ${setText(ex, set)}`);
+      startRest(restSecondsFor(ex), `Satz ${i + 1}`);
+    }
+    render();
+  },
+  'rest-add': (el) => {
+    rest.end = Math.max(Date.now(), rest.end) + Number(el.dataset.sec) * 1000;
+    rest.total = Math.max(rest.total, Math.ceil((rest.end - Date.now()) / 1000));
+    tick();
+  },
+  'rest-skip': () => hideRest(),
+  'summary-close': () => { state.summary = null; render(); },
+
+  'stats-ex': (el) => {
+    state.statsExerciseId = el.dataset.id;
+    render();
+  },
+  'set-palette': (el) => {
+    state.prefs.palette = el.dataset.palette;
+    savePrefs();
+    applyTheme();
+    render();
+  },
 
   'set-range': (el) => {
     state.prefs.range = el.dataset.range;
@@ -1370,6 +1684,49 @@ function stepWeight(el, delta) {
   const input = $(`[data-field="set-weight"][data-entry="${CSS.escape(entry.id)}"][data-set="${i}"]`);
   if (input) input.value = fmtNum(next);
   commit();
+  refreshSession();
+}
+
+function stepReps(el, delta) {
+  const entry = findEntry(el.dataset.entry);
+  const i = Number(el.dataset.set);
+  if (!entry || !entry.sets[i]) return;
+  const next = Math.max(0, Math.round((entry.sets[i].reps || 0) + delta));
+  entry.sets[i].reps = next;
+  const input = $(`[data-field="set-reps"][data-entry="${CSS.escape(entry.id)}"][data-set="${i}"]`);
+  if (input) input.value = fmtNum(next, 0);
+  commit();
+  refreshSession();
+}
+
+/** Zusammenfassung nach «Fertig» (zählt die gespeicherten Sätze, ändert nichts). */
+function workoutSummary(w) {
+  const best = bestScores(w.id);
+  let sets = 0, vol = 0;
+  const prs = [];
+  for (const en of w.entries) {
+    const ex = getExercise(en.exerciseId);
+    if (!ex) continue;
+    const vs = validSets(en);
+    sets += vs.length;
+    vs.forEach((s) => { vol += (s.weight || 0) * s.reps; });
+    const top = vs.filter((s) => isPR(ex, s, true, best)).sort((a, b) => scoreOf(ex, b) - scoreOf(ex, a))[0];
+    if (top) prs.push({ name: ex.name, text: setText(ex, top) });
+  }
+  const started = Date.parse(w.createdAt || '');
+  const mins = Math.round((Date.now() - started) / 60000);
+  return {
+    names: w.entries.map((e) => (getExercise(e.exerciseId) || {}).name).filter(Boolean).join(', '),
+    min: w.date === todayISO() && Number.isFinite(mins) && mins >= 0 && mins < 12 * 60 ? mins : null,
+    vol, sets, prs,
+  };
+}
+
+/** Aktuellen Satz markieren, ohne neu zu zeichnen (Plus/Minus erscheinen). */
+function setFocusRow(row) {
+  document.querySelectorAll('.set.is-current').forEach((r) => r.classList.remove('is-current'));
+  row.classList.add('is-current');
+  state.focus = { entry: row.dataset.entry, set: Number(row.dataset.set) };
 }
 
 async function copyText(text) {
@@ -1425,6 +1782,7 @@ const forms = {
     }
     if (w.entries.some((e) => e.exerciseId === ex.id)) { toast('Ist schon im Training'); return; }
     addEntry(w, ex);
+    state.focus = { entry: w.entries[w.entries.length - 1].id, set: 0 };
     commit();
     render();
     const lastEntry = w.entries[w.entries.length - 1];
@@ -1464,6 +1822,7 @@ function onFieldInput(el) {
     if (field === 'set-reps' && value !== null) value = Math.round(value);
     set[field === 'set-weight' ? 'weight' : 'reps'] = value;
     commit();
+    refreshSession();
   } else if (field === 'workout-note' && w) {
     w.note = el.value.slice(0, 2000);
     commit();
@@ -1494,10 +1853,22 @@ function onFieldChange(el) {
 function bindEvents() {
   document.addEventListener('click', (e) => {
     const el = e.target.closest('[data-action]');
-    if (!el || el.disabled) return;
+    if (!el) {
+      // Tippen auf eine Satz-Zeile macht sie zum aktuellen Satz
+      const row = e.target.closest('.set');
+      if (row && !row.classList.contains('is-current')) setFocusRow(row);
+      return;
+    }
+    if (el.disabled) return;
     const fn = actions[el.dataset.action];
     if (fn) { e.preventDefault(); fn(el); }
   });
+  document.addEventListener('focusin', (e) => {
+    if (!e.target.classList || !e.target.classList.contains('num')) return;
+    const row = e.target.closest('.set');
+    if (row && !row.classList.contains('is-current')) setFocusRow(row);
+  });
+  setInterval(tick, 500);
 
   document.addEventListener('submit', (e) => {
     const form = e.target.closest('[data-form]');
@@ -1550,8 +1921,10 @@ function bindEvents() {
    --------------------------------------------------------------------- */
 function applyTheme() {
   document.documentElement.dataset.theme = state.prefs.theme || 'dark';
+  const palette = PALETTES.some(([k]) => k === state.prefs.palette) ? state.prefs.palette : 'stahl';
+  document.documentElement.dataset.palette = palette;
   const meta = document.querySelector('meta[name="theme-color"]');
-  if (meta) meta.content = cssVar('--bg') || '#111214';
+  if (meta) meta.content = cssVar('--bg') || '#0e1217';
 }
 
 function startApp(secret, isNew = false) {
