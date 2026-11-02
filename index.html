@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="de-CH" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#111214">
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="referrer" content="no-referrer">
+  <title>Gym-Tracker</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23111214'/%3E%3Cpath d='M7 12v8M10 10v12M22 10v12M25 12v8M10 16h12' stroke='%23e3ad4f' stroke-width='2.5' stroke-linecap='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- App-Gerüst. Der Inhalt von #view wird von app.js gezeichnet. -->
+  <div id="app" class="app" hidden>
+    <header class="topbar">
+      <div class="topbar-inner">
+        <span class="brand">Gym-Tracker</span>
+        <nav class="tabbar" aria-label="Hauptnavigation">
+          <button class="tab" data-action="nav" data-view="training">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9v6M7 7v10M17 7v10M20 9v6M7 12h10"/></svg>
+            <span>Training</span>
+          </button>
+          <button class="tab" data-action="nav" data-view="history">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 6h14M5 12h14M5 18h9"/></svg>
+            <span>Verlauf</span>
+          </button>
+          <button class="tab" data-action="nav" data-view="stats">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19h16M6 15l4-4 3 3 5-6"/></svg>
+            <span>Fortschritt</span>
+          </button>
+          <button class="tab" data-action="nav" data-view="settings">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h9M18 7h1M5 17h3M12 17h7"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg>
+            <span>Mehr</span>
+          </button>
+        </nav>
+        <button class="sync-pill" id="syncPill" data-action="nav" data-view="settings" data-status="local">
+          <span class="sync-chip"><span class="dot" aria-hidden="true"></span><span class="sync-label">Sync nicht eingerichtet</span></span>
+        </button>
+      </div>
+    </header>
+    <main id="view" class="main"></main>
+  </div>
+
+  <!-- Startbildschirm ohne Schlüssel im Link -->
+  <div id="gate" class="gate" hidden></div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <input type="file" id="importFile" accept="application/json,.json" hidden>
+
+  <!-- Bibliotheken (feste Versionen) -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.0/dist/umd/supabase.min.js"></script>
+  <!-- Eigene Dateien -->
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
