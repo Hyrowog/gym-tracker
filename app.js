@@ -16,12 +16,16 @@
    über einen Einladungslink (?invite=CODE). Jedes Konto sieht nur seine
    eigenen Daten; Admins können alle Konten lesend ansehen.
 
+   Version 3: Trainings haben einen optionalen Namen (z.B. «Push»), der beim
+   «Fertig» vergeben wird. «Wiederholen» geht pro Name. Testumgebung unter
+   …/test/ (nur Admins, eigene Testdaten, eigener lokaler Speicher).
+
    Datenformat (wird 1:1 als JSON gespeichert und synchronisiert):
    {
      version: 1,
      updatedAt: "2026-11-02T18:00:00.000Z",
      exercises:  [{ id, name, type: "weight" | "bodyweight", variant }],
-     workouts:   [{ id, date: "YYYY-MM-DD", note, createdAt,
+     workouts:   [{ id, date: "YYYY-MM-DD", name, note, createdAt,
                     entries: [{ id, exerciseId, variant,
                                 sets: [{ weight: number|null, reps: number|null }] }] }],
      bodyweight: [{ id, date: "YYYY-MM-DD", kg }]
@@ -32,7 +36,13 @@
 /* ---------------------------------------------------------------------
    1. Konstanten & Zustand
    --------------------------------------------------------------------- */
-const STORAGE_PREFIX = 'gymtracker:';
+/* Testumgebung: dieselbe App, aber unter …/test/ (Branch «dev»).
+   Eigener lokaler Speicher und eigene Testdaten auf dem Server. */
+const IS_TEST = /\/test(\/|\/index\.html)?$/.test(location.pathname);
+const STORAGE_PREFIX = IS_TEST ? 'gymtracker-test:' : 'gymtracker:';
+const RPC_GET_DATA = IS_TEST ? 'get_my_test_data' : 'get_my_data';
+const RPC_SAVE_DATA = IS_TEST ? 'save_my_test_data' : 'save_my_data';
+const NAME_MAX = 40;
 const PREFS_KEY = STORAGE_PREFIX + 'prefs';
 const SECRET_PATTERN = /^[A-Za-z0-9_-]{20,128}$/;
 const WEIGHT_STEP = 2.5;
@@ -50,6 +60,10 @@ const TYPE_LABELS = { weight: 'Gewicht', bodyweight: 'Körpergewicht' };
 
 /* Farbwelten aus dem Redesign (nur Darstellung, pro Gerät in prefs gespeichert) */
 const PALETTES = [
+  ['limette', 'Limette', 'Leuchtendes Gelbgrün. Frisch und sehr gut sichtbar.'],
+  ['orange', 'Orange', 'Kräftig und warm, viel Energie.'],
+  ['cyan', 'Cyan', 'Klares Türkisblau, ruhig und modern.'],
+  ['violett', 'Violett', 'Sattes Violett, eigenständig.'],
   ['stahl', 'Stahl', 'Kühl und sachlich, wirkt wie ein Werkzeug.'],
   ['messing', 'Messing', 'Warmes Amber, ruhig und mit viel Kontrast.'],
   ['tartan', 'Tartan', 'Das Rot der Laufbahn. Am energiegeladensten.'],
@@ -81,7 +95,7 @@ const state = {
     activeWorkoutId: null,    // Training, das gerade bearbeitet wird
     profile: null,            // { email, display_name, is_admin } (Kopie für offline)
   },
-  prefs: { theme: 'dark', palette: 'stahl', range: '3m', lastSecret: null, lastUserId: null },
+  prefs: { theme: 'dark', palette: 'limette', range: '3m', lastSecret: null, lastUserId: null },
   auth: {
     client: null,
     recovery: false,          // true = über «Passwort vergessen»-Link gekommen
@@ -102,6 +116,7 @@ const state = {
   statsExerciseId: null,
   focus: null,                // aktueller Satz im Training { entry, set } (nur Anzeige)
   summary: null,              // Zusammenfassung nach «Fertig» (nur Anzeige)
+  naming: false,              // true = nach «Fertig»: Name fürs Training wählen
   charts: {},                 // aktive Chart.js-Instanzen
   sync: {
     configured: false,
@@ -204,6 +219,13 @@ function cssFont() {
   return getComputedStyle(document.documentElement).getPropertyValue('--font').trim() || 'system-ui, sans-serif';
 }
 
+ /* Logo: Hantel, leicht angehoben (gekippt). Farbe kommt von currentColor. */
+const LOGO_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><g transform="rotate(-30 12 12)">'
+  + '<rect x="7" y="10.9" width="10" height="2.2" rx="1.1"/>'
+  + '<rect x="4.6" y="6.2" width="3" height="11.6" rx="1.3"/><rect x="16.4" y="6.2" width="3" height="11.6" rx="1.3"/>'
+  + '<rect x="2" y="8.6" width="2.2" height="6.8" rx="1"/><rect x="19.8" y="8.6" width="2.2" height="6.8" rx="1"/></g></svg>';
+const ICON_CHEVRON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>';
+const ICON_PLUS = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>';
 const ICON_X = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7l10 10M17 7L7 17"/></svg>';
 const ICON_CHECK = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>';
 const ICON_STAR = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.5l2.9 6.2 6.8.8-5 4.6 1.3 6.7-6-3.3-6 3.3 1.3-6.7-5-4.6 6.8-.8z"/></svg>';
@@ -243,6 +265,7 @@ function normalizeData(raw) {
     .map((w) => ({
       id: String(w.id),
       date: w.date,
+      name: typeof w.name === 'string' ? w.name.trim().slice(0, NAME_MAX) : '',
       note: typeof w.note === 'string' ? w.note.slice(0, 2000) : '',
       createdAt: w.createdAt || null,
       entries: (w.entries || [])
@@ -348,7 +371,7 @@ function validSets(entry) {
 
 /* --- Änderungen an Trainings --- */
 function createWorkout(date = todayISO()) {
-  const w = { id: uid(), date, note: '', createdAt: new Date().toISOString(), entries: [] };
+  const w = { id: uid(), date, name: '', note: '', createdAt: new Date().toISOString(), entries: [] };
   state.data.workouts.push(w);
   return w;
 }
@@ -372,10 +395,28 @@ function addEntry(workout, exercise) {
   });
 }
 
-function startWorkout(mode) {
-  const previous = sortedWorkouts().find((w) => w.entries.length > 0);
+/** Gespeicherte Trainingsnamen (aus den Trainings), zuletzt benutzte zuerst. */
+function workoutNames() {
+  const seen = new Map();
+  for (const w of sortedWorkouts()) {
+    if (!w.name) continue;
+    const key = w.name.toLowerCase();
+    if (!seen.has(key)) seen.set(key, w);
+  }
+  return [...seen.values()].map((w) => ({ name: w.name, last: w }));
+}
+
+/** Letztes Training mit diesem Namen ('' = letztes Training überhaupt). */
+function lastWorkoutNamed(name) {
+  const n = String(name || '').toLowerCase();
+  return sortedWorkouts().find((w) => w.entries.length > 0 && (!n || w.name.toLowerCase() === n)) || null;
+}
+
+function startWorkout(mode, sourceId = null) {
+  const previous = sourceId ? getWorkout(sourceId) : lastWorkoutNamed('');
   const w = createWorkout();
   if (mode === 'repeat' && previous) {
+    w.name = previous.name || '';
     // Übungen vom letzten Training übernehmen, Werte als Startwerte
     w.entries = previous.entries.map((e) => ({
       id: uid(),
@@ -388,8 +429,10 @@ function startWorkout(mode) {
   state.meta.doneSets = { [w.id]: {} }; // Haken-Stand nur lokal: neues Training, noch nichts bestätigt
   state.focus = null;
   state.summary = null;
+  state.naming = false;
   commit();
   render();
+  playEnter();
   window.scrollTo(0, 0);
 }
 
@@ -450,7 +493,7 @@ async function pullFromServer() {
   state.sync.pulling = true;
   setSyncStatus('syncing');
   try {
-    const { data: row, error } = await state.sync.client.rpc('get_my_data');
+    const { data: row, error } = await state.sync.client.rpc(RPC_GET_DATA);
     if (error) throw error;
     // Während der Abfrage abgemeldet oder in ein fremdes Konto gewechselt → verwerfen
     if (state.userId !== userAtStart || state.admin.viewAs) return;
@@ -564,7 +607,7 @@ async function pushToServer() {
   const snapshotTime = state.data.updatedAt;
   try {
     const userAtStart = state.userId;
-    const { error } = await state.sync.client.rpc('save_my_data', { p_data: state.data });
+    const { error } = await state.sync.client.rpc(RPC_SAVE_DATA, { p_data: state.data });
     if (error) throw error;
     if (state.userId !== userAtStart) return;
     state.sync.allowEmptyOnce = false;
@@ -604,7 +647,7 @@ function appUrl() {
 }
 
 function inviteLink(code) {
-  const url = new URL(appUrl());
+  const url = new URL(IS_TEST ? prodUrl() : appUrl()); // Einladungen immer zum echten Tracker
   url.searchParams.set('invite', code);
   return url.toString();
 }
@@ -662,8 +705,8 @@ function authErrorText(err) {
 function gateBrand() {
   return `
     <div class="gate-brand">
-      <span class="logo"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9v6M7 7v10M17 7v10M20 9v6M7 12h10"/></svg></span>
-      <h1 class="title">Gym-Tracker</h1>
+      <span class="logo">${LOGO_SVG}</span>
+      <h1 class="title">Gym-Tracker${IS_TEST ? ' <small class="test-tag">Test</small>' : ''}</h1>
     </div>`;
 }
 
@@ -738,6 +781,16 @@ function renderGate(errorText = '', infoText = '') {
         </label>
         <button class="btn btn-p block" type="submit" ${busy}>${a.busy ? 'Einen Moment …' : 'Passwort speichern'}</button>
       </form>`;
+  } else if (a.gateMode === 'test-denied') {
+    body = `
+      <div class="card">
+        <h2>Nur für Admins</h2>
+        <p class="muted">Das ist die Testumgebung, hier werden neue Versionen ausprobiert. Dein Tracker ist unter dem normalen Link erreichbar.</p>
+        <a class="btn btn-p" href="${esc(prodUrl())}">Zum Gym-Tracker</a>
+        <button class="btn btn-s" data-action="logout-test">Abmelden</button>
+      </div>`;
+  } else if (a.gateMode === 'testing') {
+    body = '<p class="muted">Zugang wird geprüft …</p>';
   } else if (a.gateMode === 'offline') {
     const canOffline = state.prefs.lastUserId && localStorage.getItem(cacheKey(state.prefs.lastUserId));
     body = `
@@ -820,7 +873,10 @@ function handleAuthEvent(event, session) {
   if (state.auth.recovery) return; // erst neues Passwort setzen
   if (session && session.user) {
     if (location.hash.includes('access_token')) history.replaceState(null, '', location.pathname + location.search);
-    if (state.userId !== session.user.id) startApp(session.user);
+    if (state.userId !== session.user.id) {
+      if (IS_TEST) startTestApp(session.user);
+      else startApp(session.user);
+    }
   } else if (event === 'INITIAL_SESSION') {
     renderGate(state.auth.pendingError || '');
     state.auth.pendingError = '';
@@ -841,6 +897,57 @@ async function handleExpiredSession() {
   } catch { /* offline: einfach weiter */ } finally {
     state.auth.checkingSession = false;
   }
+}
+
+/* --- Testumgebung (…/test/): nur Admins, eigene Testdaten --- */
+function prodUrl() {
+  return location.origin + location.pathname.replace(/test\/(index\.html)?$/, '');
+}
+
+/** Vor dem Start prüfen, ob das Konto Admin ist. Sonst kein Zutritt. */
+async function startTestApp(user) {
+  if (state.auth.testChecking) return;
+  state.auth.testChecking = true;
+  setGate('testing');
+  try {
+    const { data, error } = await state.auth.client.rpc('get_my_profile');
+    if (error) throw error;
+    if (data && data.is_admin) startApp(user);
+    else setGate('test-denied');
+  } catch (err) {
+    console.warn(err);
+    setGate('offline', 'Zugang zur Testumgebung konnte nicht geprüft werden.');
+  } finally {
+    state.auth.testChecking = false;
+  }
+}
+
+/** Testdaten durch eine frische Kopie der echten Daten ersetzen. */
+async function resetTestData() {
+  if (!IS_TEST) return;
+  if (!confirm('Testdaten zurücksetzen? Alles, was du hier getestet hast, wird durch eine frische Kopie deiner echten Daten ersetzt. Die echten Daten bleiben unverändert.')) return;
+  try {
+    const { data: row, error } = await state.auth.client.rpc('reset_my_test_data');
+    if (error) throw error;
+    state.data = row && row.data ? normalizeData(row.data) : emptyData();
+    state.meta.dirty = false;
+    state.meta.activeWorkoutId = null;
+    state.meta.lastSyncedAt = new Date().toISOString();
+    state.sync.serverHadData = !isEmptyData(state.data);
+    state.naming = false;
+    state.summary = null;
+    saveCache();
+    render();
+    toast('Testdaten zurückgesetzt');
+  } catch (err) {
+    console.warn(err);
+    toast('Hat nicht geklappt (offline?)');
+  }
+}
+
+function testBannerHtml() {
+  if (!IS_TEST) return '';
+  return `<div class="testbar" role="status"><b>Testumgebung</b><span>Eigene Testdaten, deine echten Daten bleiben unberührt.</span></div>`;
 }
 
 /** Profil (Name, Admin?) laden und lokal merken. */
@@ -986,17 +1093,30 @@ function render() {
   else if (state.view === 'settings') html = renderSettings();
   else if (state.view === 'admin') html = renderAdmin();
   else html = renderTraining();
-  view.innerHTML = viewAsBannerHtml() + html;
+  view.innerHTML = testBannerHtml() + viewAsBannerHtml() + html;
 
   if (state.view === 'stats') drawStats();
   if (!activeWorkout()) hideRest();
   tick();
 }
 
+let enterTimer = null;
 function setView(name) {
   state.view = name;
   render();
+  playEnter();
   window.scrollTo(0, 0);
+}
+
+/** Kurze Einblendung nach einem Ansichtswechsel (nur nach Aktionen, nicht beim Sync). */
+function playEnter() {
+  const view = $('#view');
+  if (!view) return;
+  view.classList.remove('enter');
+  void view.offsetWidth; // Animation neu starten
+  view.classList.add('enter');
+  clearTimeout(enterTimer);
+  enterTimer = setTimeout(() => view.classList.remove('enter'), 700);
 }
 
 /* --- Kennzahlen für die Anzeige (ändern keine Daten) --- */
@@ -1061,23 +1181,28 @@ function nextOpen(w) {
 /* --- Training --- */
 function renderTraining() {
   const active = state.meta.activeWorkoutId && getWorkout(state.meta.activeWorkoutId);
+  if (active && state.naming) return renderNaming(active);
   if (active) return renderWorkoutEditor(active);
   if (state.summary) return renderSummary();
 
-  const last = sortedWorkouts().find((w) => w.entries.length > 0);
+  const last = lastWorkoutNamed('');
   const recent = sortedWorkouts().filter((w) => w.entries.length).slice(0, 3);
-  const lastInfo = last
-    ? last.entries.map((e) => (getExercise(e.exerciseId) || {}).name).filter(Boolean).join(', ')
-    : 'Noch kein Training';
+  // Wiederholen: pro Trainingsname eine Zeile; dazu das letzte Training, falls es keinen Namen hat
+  const repeat = workoutNames().map((n) => lastWorkoutNamed(n.name)).filter(Boolean).slice(0, 6);
+  if (last && !last.name) repeat.unshift(last);
 
   return `
-    <div class="head"><div><h1 class="title">Training</h1><p class="sub">${myName() ? `Hallo ${esc(firstWord(myName()))} · ` : ''}${esc(formatDate(todayISO()))}</p></div></div>
+    <div class="head"><div><h1 class="title">Training</h1><p class="sub">${myName() ? `Hallo ${esc(firstWord(myName()))}, ` : ''}${esc(formatDate(todayISO()))}</p></div></div>
     ${v1NoticeHtml()}
-    <div class="start">
-      <button class="btn ${last ? 'btn-p' : 'btn-s'}" data-action="start-repeat" ${last ? '' : 'disabled'}>
-        <span>Letztes Training wiederholen</span><small>${esc(lastInfo)}</small></button>
-      <button class="btn ${last ? 'btn-s' : 'btn-p'}" data-action="start-empty">
-        <span>Leeres Training</span><small>Übungen selbst wählen</small></button>
+    <div class="start card">
+      ${repeat.length ? `<div class="start-h">Wiederholen</div>
+        <div class="start-list">${repeat.map((w, i) => `
+          <button class="start-row ${i === 0 ? 'first' : ''}" data-action="start-repeat" data-id="${esc(w.id)}" style="--i:${i}">
+            <span class="start-name">${w.name ? esc(w.name) : 'Letztes Training'}</span>
+            <span class="start-when">${esc(relativeDay(w.date))}</span>
+            <i class="chev">${ICON_CHEVRON}</i>
+          </button>`).join('')}</div>` : ''}
+      <button class="btn ${repeat.length ? 'btn-s' : 'btn-p'} block start-empty" data-action="start-empty">${ICON_PLUS}<span>Leeres Training</span></button>
     </div>
     <div class="card"><div class="eyebrow">Diese Woche</div>${weekStrip()}</div>
     ${recent.length ? `
@@ -1104,7 +1229,7 @@ function renderSummary() {
   return `
     <div class="card done-hero">
       <div class="eyebrow">Gespeichert</div>
-      <h1 class="title">Training abgeschlossen</h1>
+      <h1 class="title">${s.name ? esc(s.name) : 'Training'} abgeschlossen</h1>
       <p class="muted">${esc(s.names)}</p>
     </div>
     <div class="stats">
@@ -1134,17 +1259,14 @@ function viewAsBannerHtml() {
     </div>`;
 }
 
-/** Zeile im Verlauf: aufklappbar, mit Sätzen und «Bearbeiten». */
+/** Zeile im Verlauf: zugeklappt nur Name + Datum, aufgeklappt alle Übungen. */
 function logRow(w, prCount) {
   const d = parseISODate(w.date);
-  const names = w.entries.map((e) => (getExercise(e.exerciseId) || {}).name).filter(Boolean);
-  const sets = w.entries.reduce((a, e) => a + validSets(e).length, 0);
-  const vol = w.entries.reduce((a, e) => a + validSets(e).reduce((x, s) => x + (s.weight || 0) * s.reps, 0), 0);
   return `<details>
     <summary>
       <div class="date"><b>${d.getDate()}</b><span>${esc(d.toLocaleDateString('de-CH', { weekday: 'short' }).replace('.', ''))}</span></div>
-      <div style="min-width:0"><div class="t">${names.length ? esc(names.join(', ')) : 'Keine Übungen'}</div><div class="s">${sets} ${sets === 1 ? 'Satz' : 'Sätze'} · ${thousand(vol)} kg</div></div>
-      ${prCount > 0 ? `<span class="badge">${ICON_STAR}${prCount}</span>` : '<span></span>'}
+      <div class="t ${w.name ? '' : 'unnamed'}">${w.name ? esc(w.name) : 'Training'}</div>
+      <span class="log-end">${prCount > 0 ? `<span class="badge" title="${prCount} ${prCount === 1 ? 'Rekord' : 'Rekorde'}">${ICON_STAR}${prCount}</span>` : ''}<i class="chev">${ICON_CHEVRON}</i></span>
     </summary>
     <div class="log-body">
       ${w.entries.map((en) => {
@@ -1169,7 +1291,7 @@ function renderWorkoutEditor(w) {
   const best = bestScores(w.id);
 
   return `
-    <div class="head"><div><h1 class="title">${w.date === todayISO() ? 'Heutiges Training' : 'Training'}</h1><p class="sub">${esc(formatDate(w.date))}</p></div></div>
+    <div class="head"><div><h1 class="title">${w.name ? esc(w.name) : (w.date === todayISO() ? 'Heutiges Training' : 'Training')}</h1><p class="sub">${esc(formatDate(w.date))}</p></div></div>
     <div class="session" data-workout="${esc(w.id)}">
       <div><div class="v" id="dur">–</div><div class="l">Dauer</div></div>
       <div><div class="v" id="vol">${thousand(c.vol)}<small>kg</small></div><div class="l">Volumen</div></div>
@@ -1191,11 +1313,33 @@ function renderWorkoutEditor(w) {
           </form>
         </div>
         <div class="meta">
+          <input class="input meta-name" data-field="workout-name" value="${esc(w.name)}" placeholder="Name, z.B. Push (optional)" maxlength="${NAME_MAX}" autocomplete="off" aria-label="Name des Trainings" list="workoutNameList">
+          <datalist id="workoutNameList">${workoutNames().map((n) => `<option value="${esc(n.name)}">`).join('')}</datalist>
           <input class="input" type="date" data-field="workout-date" value="${esc(w.date)}" max="${todayISO()}" aria-label="Datum">
           <input class="input" data-field="workout-note" value="${esc(w.note)}" placeholder="Notiz, z.B. «müde»" maxlength="2000" aria-label="Notiz">
         </div>
         <button class="btn btn-d block" data-action="delete-workout" data-id="${esc(w.id)}">Training löschen</button>
       </div>
+    </div>`;
+}
+
+/** Nach «Fertig»: Namen fürs Training wählen (optional). */
+function renderNaming(w) {
+  const names = workoutNames();
+  const c = sessionCounts(w);
+  return `
+    <div class="head"><div><h1 class="title">Wie heisst dieses Training?</h1><p class="sub">${w.entries.length} ${w.entries.length === 1 ? 'Übung' : 'Übungen'}, ${c.done} ${c.done === 1 ? 'Satz' : 'Sätze'}. Der Name erscheint im Verlauf und beim Wiederholen.</p></div></div>
+    <div class="card naming">
+      ${names.length ? `<div class="chips">${names.map((n) =>
+        `<button class="chip chip-name" data-action="name-pick" data-name="${esc(n.name)}">${esc(n.name)}</button>`).join('')}</div>` : ''}
+      <form class="inline-form" data-form="workout-name">
+        <input class="input" name="name" placeholder="${names.length ? 'Neuer Name' : 'z.B. Push, Pull, Beine'}" maxlength="${NAME_MAX}" autocomplete="off" aria-label="Name des Trainings" required>
+        <button class="btn btn-p" type="submit">Speichern</button>
+      </form>
+    </div>
+    <div class="row-2">
+      <button class="btn btn-s" data-action="name-back">Zurück</button>
+      <button class="btn btn-s" data-action="name-skip">Ohne Namen</button>
     </div>`;
 }
 
@@ -1427,7 +1571,7 @@ function renderStats() {
 function renderSettings() {
   const exercises = [...state.data.exercises].sort((a, b) => a.name.localeCompare(b.name, 'de'));
   const lastSync = state.meta.lastSyncedAt ? new Date(state.meta.lastSyncedAt).toLocaleString('de-CH') : '–';
-  const palette = state.prefs.palette || 'stahl';
+  const palette = state.prefs.palette || 'limette';
   const profile = state.meta.profile || {};
   if (isAdmin() && !state.admin.inviteCode && state.sync.configured && !state.admin.loadingInvite) {
     state.admin.loadingInvite = true;
@@ -1481,6 +1625,15 @@ function renderSettings() {
         <input class="input" name="link" placeholder="Alten Link einfügen: https://…/?k=…" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Alter V1-Link">
         <button class="btn btn-s" type="submit">Übernehmen</button>
       </form>
+    </div>` : ''}
+
+    ${IS_TEST ? `<div class="card test-card">
+      <h2>Testumgebung</h2>
+      <p class="small muted">Hier siehst du neue Versionen, bevor sie für alle live gehen. Die Daten hier sind eine Kopie deiner echten Daten. Was du hier einträgst, landet nicht im echten Tracker.</p>
+      <div class="row-2">
+        <button class="btn btn-s" data-action="test-reset">Neu kopieren</button>
+        <a class="btn btn-s" href="${esc(prodUrl())}">Echter Tracker</a>
+      </div>
     </div>` : ''}
 
     <div class="card">
@@ -1898,7 +2051,7 @@ function focusField(selector) {
 const actions = {
   nav: (el) => setView(el.dataset.view),
 
-  'start-repeat': () => startWorkout('repeat'),
+  'start-repeat': (el) => startWorkout('repeat', el.dataset.id || null),
   'start-empty': () => startWorkout('empty'),
 
   'open-workout': (el) => {
@@ -1906,35 +2059,71 @@ const actions = {
     state.meta.doneSets = {}; // Haken-Stand wird aus den eingetragenen Sätzen neu aufgebaut
     state.focus = null;
     state.summary = null;
+    state.naming = false;
     saveCache();
     setView('training');
   },
 
   'finish-workout': () => {
     const w = activeWorkout();
-    state.summary = w && w.entries.length ? workoutSummary(w) : null;
-    state.meta.activeWorkoutId = null;
-    state.meta.doneSets = {};
-    state.focus = null;
-    hideRest();
-    if (w && w.entries.length === 0) {
-      // Leere Trainings nicht aufbewahren
-      state.data.workouts = state.data.workouts.filter((x) => x.id !== w.id);
-      commit();
-    } else {
-      saveCache();
-      if (w) toast('Training gespeichert');
+    // Noch kein Name → zuerst fragen (optional)
+    if (w && w.entries.length && !w.name) {
+      state.naming = true;
+      hideRest();
+      render();
+      playEnter();
+      window.scrollTo(0, 0);
+      return;
     }
-    render();
-    window.scrollTo(0, 0);
+    finishWorkout();
   },
+  'name-pick': (el) => setWorkoutNameAndFinish(el.dataset.name),
+  'name-skip': () => finishWorkout(),
+  'name-back': () => { state.naming = false; render(); },
+  'test-reset': () => resetTestData(),
+};
 
+function setWorkoutNameAndFinish(name) {
+  const w = activeWorkout();
+  const clean = String(name || '').trim().slice(0, NAME_MAX);
+  if (w && clean) {
+    // gleiche Schreibweise wie ein schon gespeicherter Name verwenden
+    const known = workoutNames().find((n) => n.name.toLowerCase() === clean.toLowerCase());
+    w.name = known ? known.name : clean;
+    commit();
+  }
+  finishWorkout();
+}
+
+function finishWorkout() {
+  const w = activeWorkout();
+  state.naming = false;
+  state.summary = w && w.entries.length ? workoutSummary(w) : null;
+  state.meta.activeWorkoutId = null;
+  state.meta.doneSets = {};
+  state.focus = null;
+  hideRest();
+  if (w && w.entries.length === 0) {
+    // Leere Trainings nicht aufbewahren
+    state.data.workouts = state.data.workouts.filter((x) => x.id !== w.id);
+    commit();
+  } else {
+    saveCache();
+    if (w) toast('Training gespeichert');
+  }
+  render();
+  playEnter();
+  window.scrollTo(0, 0);
+}
+
+const moreActions = {
   'delete-workout': (el) => {
     if (!confirm('Dieses Training wirklich löschen?')) return;
     state.data.workouts = state.data.workouts.filter((w) => w.id !== el.dataset.id);
     state.meta.activeWorkoutId = null;
     state.meta.doneSets = {};
     state.focus = null;
+    state.naming = false;
     hideRest();
     commit();
     toast('Training gelöscht');
@@ -2003,12 +2192,20 @@ const actions = {
     setDone(w, entry, i, done);
     state.focus = null;
     saveCache();
+    let pr = false;
     if (done && ex) {
       const set = entry.sets[i];
-      if (isPR(ex, set, true, bestScores(w.id))) toast(`Neuer Rekord: ${ex.name} ${setText(ex, set)}`);
+      pr = isPR(ex, set, true, bestScores(w.id));
+      if (pr) toast(`Neuer Rekord: ${ex.name} ${setText(ex, set)}`);
       startRest(restSecondsFor(ex), `Satz ${i + 1}`);
     }
     render();
+    if (done) {
+      const sel = `[data-entry="${CSS.escape(entry.id)}"][data-set="${i}"]`;
+      $(`.set${sel}`)?.classList.add('just-done');
+      $(`.check${sel}`)?.classList.add('just-done');
+      if (pr) $(`.entry[data-entry="${CSS.escape(entry.id)}"] .ex-h .badge`)?.classList.add('just-pr');
+    }
   },
   'rest-add': (el) => {
     rest.end = Math.max(Date.now(), rest.end) + Number(el.dataset.sec) * 1000;
@@ -2121,7 +2318,12 @@ const actions = {
   }),
   reload: () => location.reload(),
   'gate-offline': () => startOffline(),
+  'logout-test': async () => {
+    try { await state.auth.client.auth.signOut(); } catch (err) { console.warn(err); }
+    setGate('login');
+  },
 };
+Object.assign(actions, moreActions);
 
 function stepWeight(el, delta) {
   const entry = findEntry(el.dataset.entry);
@@ -2165,6 +2367,7 @@ function workoutSummary(w) {
   const started = Date.parse(w.createdAt || '');
   const mins = Math.round((Date.now() - started) / 60000);
   return {
+    name: w.name || '',
     names: w.entries.map((e) => (getExercise(e.exerciseId) || {}).name).filter(Boolean).join(', '),
     min: w.date === todayISO() && Number.isFinite(mins) && mins >= 0 && mins < 12 * 60 ? mins : null,
     vol, sets, prs,
@@ -2220,6 +2423,8 @@ async function importData(file) {
 
 /* --- Formulare --- */
 const forms = {
+  'workout-name': (form) => setWorkoutNameAndFinish(form.name.value),
+
   'new-exercise': (form) => {
     const w = activeWorkout();
     const name = form.name.value.trim().slice(0, 80);
@@ -2369,6 +2574,9 @@ function onFieldInput(el) {
     set[field === 'set-weight' ? 'weight' : 'reps'] = value;
     commit();
     refreshSession();
+  } else if (field === 'workout-name' && w) {
+    w.name = el.value.trim().slice(0, NAME_MAX);
+    commit();
   } else if (field === 'workout-note' && w) {
     w.note = el.value.slice(0, 2000);
     commit();
@@ -2472,10 +2680,22 @@ function bindEvents() {
    --------------------------------------------------------------------- */
 function applyTheme() {
   document.documentElement.dataset.theme = state.prefs.theme || 'dark';
-  const palette = PALETTES.some(([k]) => k === state.prefs.palette) ? state.prefs.palette : 'stahl';
+  const palette = PALETTES.some(([k]) => k === state.prefs.palette) ? state.prefs.palette : 'limette';
   document.documentElement.dataset.palette = palette;
   const meta = document.querySelector('meta[name="theme-color"]');
   if (meta) meta.content = cssVar('--bg') || '#0e1217';
+  updateFavicon();
+}
+
+/** Favicon (Tab-Symbol) in der gewählten Akzentfarbe. */
+function updateFavicon() {
+  const accent = cssVar('--accent') || '#c6f24e';
+  const ink = cssVar('--accent-ink') || '#000';
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="8" fill="${accent}"/>`
+    + `<g transform="translate(4 4)" fill="${ink}">${LOGO_SVG.replace(/^<svg[^>]*>|<\/svg>$/g, '')}</g></svg>`;
+  let link = document.querySelector('link[rel="icon"]');
+  if (!link) { link = document.createElement('link'); link.rel = 'icon'; document.head.appendChild(link); }
+  link.href = 'data:image/svg+xml,' + encodeURIComponent(svg);
 }
 
 /** App für ein angemeldetes Konto starten (user = Supabase-User). */
@@ -2554,6 +2774,12 @@ async function logout() {
 
 function init() {
   loadPrefs();
+  const brandLogo = $('#brandLogo');
+  if (brandLogo) brandLogo.innerHTML = LOGO_SVG;
+  if (IS_TEST) {
+    document.title = 'Gym-Tracker (Test)';
+    document.body.classList.add('is-test');
+  }
   applyTheme();
   bindEvents();
   readInviteFromUrl();

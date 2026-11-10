@@ -9,7 +9,9 @@ Schlanker Trainings-Tracker fürs Handy: Sätze direkt nach dem Satz eintragen, 
 - Daten: localStorage (schnell, offline) + Supabase (Sync zwischen Geräten)
 - Diagramme mit Chart.js 4.4.1
 
-**Einrichtung:** siehe [SETUP.md](SETUP.md).
+- **Version 3:** Trainingsnamen (z.B. Push), Wiederholen pro Name, neues Logo und Farben, Testumgebung unter `/test/` (Branch `dev`, nur Admins, eigene Testdaten)
+
+**Einrichtung:** siehe [SETUP.md](SETUP.md) (V2) und [SETUP-V3.md](SETUP-V3.md) (Testumgebung, neue Versionen veröffentlichen).
 
 ## Code-Aufbau
 
