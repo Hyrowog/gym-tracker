@@ -99,7 +99,8 @@
   .nudge button { min-width: 52px; height: 38px; }
   .add-set { margin: 4px 18px 8px; }
 
-  .meta { grid-template-columns: 200px minmax(0, 1fr); }
+  .meta { grid-template-columns: minmax(0, 1fr) 200px minmax(0, 1fr); }
+  .meta-name { grid-column: auto; }
 
   /* ---------- Fortschritt: Diagramm oben, Heatmap und Bestwerte nebeneinander ---------- */
   .st-grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }

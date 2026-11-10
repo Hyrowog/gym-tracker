@@ -1,0 +1,61 @@
+# Veröffentlicht den Gym-Tracker auf GitHub Pages:
+#   Branch «main» → https://hyrowog.github.io/gym-tracker/       (für alle)
+#   Branch «dev»  → https://hyrowog.github.io/gym-tracker/test/  (Testumgebung, nur Admins)
+# Läuft automatisch bei jedem Commit auf main oder dev.
+name: Seite veröffentlichen
+
+on:
+  push:
+    branches: [main, dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: main holen
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: main
+
+      - name: dev holen (falls vorhanden)
+        uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          ref: dev
+          path: dev
+
+      - name: Seite zusammenbauen
+        run: |
+          mkdir -p _site
+          rsync -a --exclude '.git' --exclude '.github' --exclude '*.sql' --exclude '*.md' main/ _site/
+          if [ -f dev/index.html ]; then
+            mkdir -p _site/test
+            rsync -a --exclude '.git' --exclude '.github' --exclude '*.sql' --exclude '*.md' dev/ _site/test/
+          fi
+          ls -R _site
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
