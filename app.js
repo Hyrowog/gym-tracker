@@ -24,8 +24,9 @@
    {
      version: 1,
      updatedAt: "2026-11-02T18:00:00.000Z",
-     exercises:  [{ id, name, type: "weight" | "bodyweight", variant }],
-     workouts:   [{ id, date: "YYYY-MM-DD", name, note, createdAt,
+     exercises:  [{ id, name, type: "weight" | "bodyweight" | "distance", variant }],
+     (Bei type "distance" bedeutet ein Satz: weight = Distanz in km, reps = Zeit in Sekunden.)
+     workouts:   [{ id, date: "YYYY-MM-DD", name, note, createdAt, durationMin,
                     entries: [{ id, exerciseId, variant,
                                 sets: [{ weight: number|null, reps: number|null }] }] }],
      bodyweight: [{ id, date: "YYYY-MM-DD", kg }]
@@ -46,7 +47,7 @@ const NAME_MAX = 40;
 const PREFS_KEY = STORAGE_PREFIX + 'prefs';
 const SECRET_PATTERN = /^[A-Za-z0-9_-]{20,128}$/;
 const WEIGHT_STEP = 2.5;
-const DEFAULT_SET_COUNT = 3;
+const DEFAULT_SET_COUNT = 1; // V3: mit einem Satz starten, weitere per «+ Satz»
 const SYNC_DEBOUNCE_MS = 800;
 const SYNC_RETRY_MS = 30000;
 
@@ -56,7 +57,10 @@ const RANGES = {
   all: { label: 'Alles', days: null },
 };
 
-const TYPE_LABELS = { weight: 'Gewicht', bodyweight: 'Körpergewicht' };
+const TYPE_LABELS = { weight: 'Gewicht', bodyweight: 'Körpergewicht', distance: 'Distanz' };
+const TYPE_KEYS = Object.keys(TYPE_LABELS);
+const KM_STEP = 0.5;
+const TIME_STEP = 60; // Sekunden
 
 /* Farbwelten aus dem Redesign (nur Darstellung, pro Gerät in prefs gespeichert) */
 const PALETTES = [
@@ -64,12 +68,6 @@ const PALETTES = [
   ['orange', 'Orange', 'Kräftig und warm, viel Energie.'],
   ['cyan', 'Cyan', 'Klares Türkisblau, ruhig und modern.'],
   ['violett', 'Violett', 'Sattes Violett, eigenständig.'],
-  ['stahl', 'Stahl', 'Kühl und sachlich, wirkt wie ein Werkzeug.'],
-  ['messing', 'Messing', 'Warmes Amber, ruhig und mit viel Kontrast.'],
-  ['tartan', 'Tartan', 'Das Rot der Laufbahn. Am energiegeladensten.'],
-  ['rasen', 'Rasen', 'Grün wie die Schlittenbahn. Akzent und «erledigt» fallen zusammen.'],
-  ['magnesia', 'Magnesia', 'Fast nur Schwarz und Weiss. Farbe bleibt für Status und Rekorde.'],
-  ['indigo', 'Indigo', 'Violett-Blau, etwas verspielter.'],
 ];
 
 const SYNC_LABELS = {
@@ -191,6 +189,28 @@ function fmtNum(n, digits = 2) {
 }
 function roundHalf(n) { return Math.round(n * 2) / 2; }
 
+/** Sekunden → "25:30" oder "1:05:00". */
+function fmtTime(sec) {
+  if (sec === null || sec === undefined || !Number.isFinite(sec) || sec <= 0) return '';
+  const t = Math.round(sec);
+  const h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), x = t % 60;
+  const p2 = (n) => String(n).padStart(2, '0');
+  return h ? `${h}:${p2(m)}:${p2(x)}` : `${m}:${p2(x)}`;
+}
+/** "25" = 25 min, "25:30" / "25.30" / "25,30" = 25 min 30 s, "1:05:00" = 1 h 5 min. Leer → null. */
+function parseTime(str) {
+  const t = String(str ?? '').trim();
+  if (!t) return null;
+  const parts = t.split(/[:.,]/).map((x) => x.trim());
+  if (parts.some((x) => !/^\d+$/.test(x)) || parts.length > 3) return null;
+  const n = parts.map(Number);
+  if (n.length === 1) return n[0] * 60;
+  if (n.length === 2) return n[0] * 60 + n[1];
+  return n[0] * 3600 + n[1] * 60 + n[2];
+}
+/** Tempo in min/km als "5:06". */
+function fmtPace(km, sec) { return km > 0 && sec > 0 ? fmtTime(sec / km) : ''; }
+
 let toastTimer = null;
 function toast(message) {
   const el = $('#toast');
@@ -255,7 +275,7 @@ function normalizeData(raw) {
     .map((e) => ({
       id: String(e.id),
       name: e.name.trim().slice(0, 80) || 'Übung',
-      type: e.type === 'bodyweight' ? 'bodyweight' : 'weight',
+      type: TYPE_KEYS.includes(e.type) ? e.type : 'weight',
       variant: typeof e.variant === 'string' ? e.variant.slice(0, 60) : '',
     }));
   const exIds = new Set(exercises.map((e) => e.id));
@@ -268,6 +288,8 @@ function normalizeData(raw) {
       name: typeof w.name === 'string' ? w.name.trim().slice(0, NAME_MAX) : '',
       note: typeof w.note === 'string' ? w.note.slice(0, 2000) : '',
       createdAt: w.createdAt || null,
+      durationMin: Number.isFinite(Number(w.durationMin)) && w.durationMin !== null && Number(w.durationMin) > 0 && Number(w.durationMin) <= 720
+        ? Math.round(Number(w.durationMin)) : null,
       entries: (w.entries || [])
         .filter((en) => en && exIds.has(String(en.exerciseId)))
         .map((en) => ({
@@ -366,6 +388,8 @@ function exerciseUseCount(id) {
 }
 
 function validSets(entry) {
+  const ex = getExercise(entry.exerciseId);
+  if (ex && ex.type === 'distance') return entry.sets.filter((s) => (s.weight || 0) > 0 || (s.reps || 0) > 0);
   return entry.sets.filter((s) => s.reps !== null && s.reps > 0);
 }
 
@@ -376,11 +400,12 @@ function createWorkout(date = todayISO()) {
   return w;
 }
 
-/** Sätze für eine Übung vorbereiten: vom letzten Mal übernehmen, sonst 3 leere. */
+/** Sätze für eine Übung vorbereiten: ein Satz, Werte vom ersten Satz vom letzten Mal. */
 function startingSets(exerciseId, excludeWorkoutId) {
   const last = lastEntryFor(exerciseId, excludeWorkoutId);
   if (last && last.entry.sets.length) {
-    return last.entry.sets.map((s) => ({ weight: s.weight, reps: s.reps }));
+    const s = last.entry.sets[0];
+    return [{ weight: s.weight, reps: s.reps }];
   }
   return Array.from({ length: DEFAULT_SET_COUNT }, () => ({ weight: null, reps: null }));
 }
@@ -422,7 +447,7 @@ function startWorkout(mode, sourceId = null) {
       id: uid(),
       exerciseId: e.exerciseId,
       variant: e.variant,
-      sets: e.sets.map((s) => ({ weight: s.weight, reps: s.reps })),
+      sets: e.sets.slice(0, 1).map((s) => ({ weight: s.weight, reps: s.reps })), // nur der erste Satz
     }));
   }
   state.meta.activeWorkoutId = w.id;
@@ -1120,8 +1145,16 @@ function playEnter() {
 }
 
 /* --- Kennzahlen für die Anzeige (ändern keine Daten) --- */
-function e1rmOf(s) { const w = s.weight || 0; return s.reps === 1 ? w : w * (1 + (s.reps || 0) / 30); }
-function scoreOf(ex, s) { return ex.type === 'bodyweight' ? (s.reps || 0) : e1rmOf(s); }
+/**
+ * Kraftwert eines Satzes: Gewicht mit einem Bonus für Wiederholungen
+ * (Gewicht × (1 + Wdh./30), Wdh. höchstens 12 gezählt, damit lange Sätze nicht ausreissen).
+ */
+const KRAFT_MAX_REPS = 12;
+function kraftOf(s) { const w = s.weight || 0; return w * (1 + Math.min(s.reps || 0, KRAFT_MAX_REPS) / 30); }
+function scoreOf(ex, s) {
+  if (ex.type === 'distance') return s.weight || 0; // Rekord = längste Distanz
+  return ex.type === 'bodyweight' ? (s.reps || 0) : kraftOf(s);
+}
 
 /** Bester Wert pro Übung über alle Trainings ausser excludeId (für Rekorde). */
 function bestScores(excludeId) {
@@ -1142,6 +1175,10 @@ function isPR(ex, s, done, best) {
 }
 
 function setText(ex, s) {
+  if (ex.type === 'distance') {
+    const parts = [s.weight ? `${fmtNum(s.weight)} km` : '', s.reps ? fmtTime(s.reps) : ''].filter(Boolean);
+    return parts.join(' in ') || '–';
+  }
   if (ex.type === 'bodyweight') return s.weight ? `+${fmtNum(s.weight)} × ${s.reps}` : `${s.reps} Wdh.`;
   return `${fmtNum(s.weight || 0)} × ${s.reps}`;
 }
@@ -1232,9 +1269,8 @@ function renderSummary() {
       <h1 class="title">${s.name ? esc(s.name) : 'Training'} abgeschlossen</h1>
       <p class="muted">${esc(s.names)}</p>
     </div>
-    <div class="stats">
+    <div class="stats stats-3">
       <div class="stat"><div class="v">${s.min === null ? '–' : s.min}</div><div class="l">Minuten</div></div>
-      <div class="stat"><div class="v">${thousand(s.vol)}</div><div class="l">kg Volumen</div></div>
       <div class="stat"><div class="v">${s.sets}</div><div class="l">Sätze</div></div>
       <div class="stat"><div class="v">${s.prs.length}</div><div class="l">Rekorde</div></div>
     </div>
@@ -1294,7 +1330,6 @@ function renderWorkoutEditor(w) {
     <div class="head"><div><h1 class="title">${w.name ? esc(w.name) : (w.date === todayISO() ? 'Heutiges Training' : 'Training')}</h1><p class="sub">${esc(formatDate(w.date))}</p></div></div>
     <div class="session" data-workout="${esc(w.id)}">
       <div><div class="v" id="dur">–</div><div class="l">Dauer</div></div>
-      <div><div class="v" id="vol">${thousand(c.vol)}<small>kg</small></div><div class="l">Volumen</div></div>
       <div><div class="v" id="setCount">${c.done}<small>/${c.all}</small></div><div class="l">Sätze</div></div>
       <button class="btn btn-p" data-action="finish-workout">Fertig</button>
       <div class="bar"><i id="setBar" style="width:${c.all ? (c.done / c.all) * 100 : 0}%"></i></div>
@@ -1307,8 +1342,8 @@ function renderWorkoutEditor(w) {
           ${available.length ? `<div class="chips">${available.map((e) =>
             `<button class="chip" data-action="add-existing" data-id="${esc(e.id)}">${esc(e.name)}</button>`).join('')}</div>` : ''}
           <form class="new-ex" data-form="new-exercise">
-            <input class="input" name="name" placeholder="Neue Übung, z.B. Beinpresse" maxlength="80" autocomplete="off" aria-label="Name der neuen Übung" required>
-            <select class="input" name="type" aria-label="Art der Übung"><option value="weight">Gewicht</option><option value="bodyweight">Körpergewicht</option></select>
+            <input class="input" name="name" placeholder="Neue Übung, z.B. Beinpresse oder Joggen" maxlength="80" autocomplete="off" aria-label="Name der neuen Übung" required>
+            <select class="input" name="type" aria-label="Art der Übung">${TYPE_KEYS.map((k) => `<option value="${k}">${TYPE_LABELS[k]}</option>`).join('')}</select>
             <button class="btn btn-s" type="submit">Hinzufügen</button>
           </form>
         </div>
@@ -1347,6 +1382,7 @@ function renderEntry(w, entry, focus, best) {
   const ex = getExercise(entry.exerciseId);
   if (!ex) return '';
   const isBw = ex.type === 'bodyweight';
+  const isDist = ex.type === 'distance';
   const last = lastEntryFor(ex.id, w.id);
   const done = entry.sets.filter((s, i) => isDone(w, entry, i)).length;
   const hasPR = entry.sets.some((s, i) => isPR(ex, s, isDone(w, entry, i), best));
@@ -1358,36 +1394,46 @@ function renderEntry(w, entry, focus, best) {
       ${isBw ? `<div class="ex-variant"><input class="input" data-field="entry-variant" data-entry="${esc(entry.id)}" value="${esc(entry.variant)}"
         placeholder="Variante, z.B. Stufe 2 oder assistiert" maxlength="60" aria-label="Variante"></div>` : ''}
       <div>
-        <div class="labels"><span>Satz</span><span>Zuletzt</span><span>${isBw ? '+ kg' : 'kg'}</span><span>Wdh.</span><span></span></div>
+        <div class="labels"><span>${isDist ? 'Lauf' : 'Satz'}</span><span>Zuletzt</span><span>${isDist ? 'km' : isBw ? '+ kg' : 'kg'}</span><span>${isDist ? 'Zeit' : 'Wdh.'}</span><span></span></div>
         ${entry.sets.map((s, i) => renderSetRow(w, entry, s, i, ex, last, focus, best)).join('')}
       </div>
-      <button class="btn btn-g add-set" data-action="add-set" data-entry="${esc(entry.id)}">+ Satz hinzufügen</button>
+      <button class="btn btn-g add-set" data-action="add-set" data-entry="${esc(entry.id)}">${isDist ? '+ Lauf hinzufügen' : '+ Satz hinzufügen'}</button>
     </section>`;
 }
 
 function renderSetRow(w, entry, set, i, ex, last, focus, best) {
   const e = esc(entry.id);
   const isBw = ex.type === 'bodyweight';
+  const isDist = ex.type === 'distance';
   const done = isDone(w, entry, i);
   const cur = focus && focus.entry === entry.id && focus.set === i;
   const pr = isPR(ex, set, done, best);
   const ps = last && last.entry.sets[i];
-  const prev = ps && ps.reps ? setText(ex, ps).replace(' Wdh.', '') : '–';
+  const prev = isDist
+    ? (ps && (ps.weight || ps.reps) ? [ps.weight ? fmtNum(ps.weight) + ' km' : '', fmtTime(ps.reps)].filter(Boolean).join('\n') : '–')
+    : (ps && ps.reps ? setText(ex, ps).replace(' Wdh.', '') : '–');
+  const unitW = isDist ? 'km' : 'kg';
+  const stepW = isDist ? KM_STEP : WEIGHT_STEP;
   const a = `data-entry="${e}" data-set="${i}"`;
   return `
     <div class="set set-row ${done ? 'is-done' : ''} ${cur ? 'is-current' : ''} ${pr ? 'is-pr' : ''}" ${a}>
       <div class="set-main">
         <span class="set-no" title="${pr ? 'Neuer Rekord' : ''}">${pr ? `<span class="badge" style="padding:1px 3px">${ICON_STAR}</span>` : i + 1}</span>
-        <span class="set-prev">${esc(prev)}</span>
+        <span class="set-prev ${isDist ? 'two' : ''}">${esc(prev)}</span>
         <input class="num" data-field="set-weight" ${a} inputmode="decimal" autocomplete="off"
-          value="${esc(fmtNum(set.weight))}" placeholder="${isBw ? '+0' : 'kg'}" aria-label="Gewicht Satz ${i + 1}">
-        <input class="num" data-field="set-reps" ${a} inputmode="numeric" pattern="[0-9]*" autocomplete="off"
-          value="${esc(fmtNum(set.reps, 0))}" placeholder="–" aria-label="Wiederholungen Satz ${i + 1}">
+          value="${esc(fmtNum(set.weight))}" placeholder="${isDist ? 'km' : isBw ? '+0' : 'kg'}" aria-label="${isDist ? 'Distanz' : 'Gewicht'} ${isDist ? 'Lauf' : 'Satz'} ${i + 1}">
+        ${isDist
+          ? `<input class="num" data-field="set-time" ${a} inputmode="decimal" autocomplete="off"
+          value="${esc(fmtTime(set.reps))}" placeholder="min:s" aria-label="Zeit Lauf ${i + 1} (Minuten:Sekunden)">`
+          : `<input class="num" data-field="set-reps" ${a} inputmode="numeric" pattern="[0-9]*" autocomplete="off"
+          value="${esc(fmtNum(set.reps, 0))}" placeholder="–" aria-label="Wiederholungen Satz ${i + 1}">`}
         <button class="check" data-action="set-done" ${a} aria-pressed="${done}" aria-label="Satz ${i + 1} ${done ? 'wieder öffnen' : 'bestätigen'}">${ICON_CHECK}</button>
       </div>
       <div class="set-tools">
-        <div class="nudge"><span>kg</span><button type="button" data-action="w-dec" ${a} aria-label="Gewicht minus ${WEIGHT_STEP}">−${WEIGHT_STEP}</button><button type="button" data-action="w-inc" ${a} aria-label="Gewicht plus ${WEIGHT_STEP}">+${WEIGHT_STEP}</button></div>
-        <div class="nudge"><span>Wdh.</span><button type="button" data-action="r-dec" ${a} aria-label="Eine Wiederholung weniger">−1</button><button type="button" data-action="r-inc" ${a} aria-label="Eine Wiederholung mehr">+1</button></div>
+        <div class="nudge"><span>${unitW}</span><button type="button" data-action="w-dec" ${a} aria-label="${unitW} minus ${stepW}">−${stepW}</button><button type="button" data-action="w-inc" ${a} aria-label="${unitW} plus ${stepW}">+${stepW}</button></div>
+        ${isDist
+          ? `<div class="nudge"><span>Zeit</span><button type="button" data-action="r-dec" ${a} aria-label="Eine Minute weniger">−1:00</button><button type="button" data-action="r-inc" ${a} aria-label="Eine Minute mehr">+1:00</button></div>`
+          : `<div class="nudge"><span>Wdh.</span><button type="button" data-action="r-dec" ${a} aria-label="Eine Wiederholung weniger">−1</button><button type="button" data-action="r-inc" ${a} aria-label="Eine Wiederholung mehr">+1</button></div>`}
         <button type="button" class="x set-del" data-action="remove-set" ${a} aria-label="Satz ${i + 1} entfernen" title="Satz entfernen">${ICON_X}</button>
       </div>
     </div>`;
@@ -1396,9 +1442,8 @@ function renderSetRow(w, entry, set, i, ex, last, focus, best) {
 /** Kopfzeile des Trainings ohne Neuzeichnen aktualisieren (Fokus bleibt im Feld). */
 function refreshSession() {
   const w = activeWorkout();
-  if (!w || !$('#vol')) return;
+  if (!w || !$('#setCount')) return;
   const c = sessionCounts(w);
-  $('#vol').innerHTML = `${thousand(c.vol)}<small>kg</small>`;
   $('#setCount').innerHTML = `${c.done}<small>/${c.all}</small>`;
   $('#setBar').style.width = (c.all ? (c.done / c.all) * 100 : 0) + '%';
 }
@@ -1408,6 +1453,7 @@ function setsSummary(ex, entry) {
   const sets = validSets(entry);
   if (!sets.length) return '–';
   return sets.map((s) => {
+    if (ex.type === 'distance') return setText(ex, s);
     if (ex.type === 'bodyweight') return s.weight ? `+${fmtNum(s.weight)} kg×${s.reps}` : `${s.reps} Wdh.`;
     return `${fmtNum(s.weight) || 0}×${s.reps}`;
   }).join(', ') + (entry.variant ? ` (${entry.variant})` : '');
@@ -1465,9 +1511,12 @@ function workoutsInRange() {
 
 function periodStats(from, to) {
   const ws = state.data.workouts.filter((w) => w.date >= from && w.date <= to && w.entries.some((e) => validSets(e).length));
-  let sets = 0, vol = 0;
-  ws.forEach((w) => w.entries.forEach((e) => validSets(e).forEach((s) => { sets++; vol += (s.weight || 0) * s.reps; })));
-  return { days: new Set(ws.map((w) => w.date)).size, sets, vol };
+  let sets = 0;
+  ws.forEach((w) => w.entries.forEach((e) => { sets += validSets(e).length; }));
+  // Ø Dauer: nur Trainings mit gemessener Dauer (ab V3), auf ganze Minuten gerundet
+  const timed = ws.filter((w) => w.durationMin);
+  const avgMin = timed.length ? Math.round(timed.reduce((a, w) => a + w.durationMin, 0) / timed.length) : null;
+  return { days: new Set(ws.map((w) => w.date)).size, sets, avgMin };
 }
 
 function renderStats() {
@@ -1475,13 +1524,6 @@ function renderStats() {
   const inRange = workoutsInRange();
   const days = new Set(inRange.map((w) => w.date));
 
-  // Durchschnitt pro Woche
-  let spanDays = r.days;
-  if (!spanDays) {
-    const first = [...days].sort()[0];
-    spanDays = first ? Math.max(28, Math.round((parseISODate(todayISO()) - parseISODate(first)) / 86400000) + 1) : 7;
-  }
-  const perWeek = days.size / (spanDays / 7);
   const cur = periodStats(rangeStartISO(), todayISO());
   const prev = r.days
     ? periodStats(toISODate(addDays(parseISODate(rangeStartISO()), -r.days)), toISODate(addDays(parseISODate(rangeStartISO()), -1)))
@@ -1494,8 +1536,9 @@ function renderStats() {
   }
   const ex = state.statsExerciseId ? getExercise(state.statsExerciseId) : null;
   const isBw = ex && ex.type === 'bodyweight';
-  const unit = isBw ? 'Wdh.' : 'kg';
-  const series = ex ? exerciseSeries(ex) : [];
+  const isDist = ex && ex.type === 'distance';
+  const unit = isDist ? 'km' : isBw ? 'Wdh.' : 'kg';
+  const series = ex ? seriesFor(ex) : [];
   const lastP = series.length ? series[series.length - 1] : null;
   const change = series.length > 1 ? lastP.primary - series[0].primary : null;
 
@@ -1515,11 +1558,10 @@ function renderStats() {
     <div class="head"><div><h1 class="title">Fortschritt</h1></div>
       <div class="seg" role="group" aria-label="Zeitraum">${Object.entries(RANGES).map(([key, v]) =>
         `<button data-action="set-range" data-range="${key}" aria-pressed="${state.prefs.range === key}">${v.label}</button>`).join('')}</div></div>
-    <div class="stats">
+    <div class="stats stats-3">
       <div class="stat"><div class="v">${days.size}</div><div class="l">Trainingstage</div>${delta(cur.days, prev && prev.days)}</div>
-      <div class="stat"><div class="v">${fmtNum(perWeek, 1)}</div><div class="l">pro Woche</div>${prev ? `<div class="d">Vorperiode ${fmtNum(prev.days / (spanDays / 7), 1)}</div>` : ''}</div>
       <div class="stat"><div class="v">${thousand(cur.sets)}</div><div class="l">Sätze</div>${delta(cur.sets, prev && prev.sets)}</div>
-      <div class="stat"><div class="v">${fmtNum(cur.vol / 1000, 1)} t</div><div class="l">Volumen</div>${delta(cur.vol, prev && prev.vol, (x) => fmtNum(x / 1000, 1) + ' t')}</div>
+      <div class="stat"><div class="v">${cur.avgMin === null ? '–' : `${cur.avgMin}<small> min</small>`}</div><div class="l">Ø Dauer</div>${cur.avgMin !== null && prev && prev.avgMin !== null ? delta(cur.avgMin, prev.avgMin, (x) => x + ' min') : ''}</div>
     </div>
     <div class="st-grid">
       <div class="card span2">
@@ -1528,16 +1570,24 @@ function renderStats() {
             `<button class="chip" data-action="stats-ex" data-id="${esc(e.id)}" aria-pressed="${e.id === state.statsExerciseId}">${esc(e.name)}</button>`).join('')}</div>
           ${series.length ? `
             <div class="hero" id="exBest">
-              <div><div class="eyebrow">${isBw ? 'Meiste Wiederholungen im Satz' : 'Geschätztes 1RM'}</div><div class="big">${fmtNum(lastP.primary, 1)}<small>${unit}</small></div></div>
+              <div><div class="eyebrow">${isDist ? `Distanz letztes Training${lastP.pace ? `, Tempo ${esc(lastP.pace)} /km` : ''}` : isBw ? 'Meiste Wiederholungen im Satz' : 'Kraftwert'}</div><div class="big">${fmtNum(lastP.primary, 1)}<small>${unit}</small></div></div>
               ${change !== null ? `<div class="delta ${change < 0 ? 'down' : ''}">${change >= 0 ? '+' : '−'}${fmtNum(Math.abs(change), 1)} ${unit} seit ${esc(formatDate(toISODate(new Date(series[0].x)), 'short'))}</div>` : ''}
             </div>
-            <div class="legend"><span><i></i>${isBw ? 'Max. Wdh.' : 'Geschätztes 1RM'}</span><span><i class="dash"></i>${isBw ? 'Wdh. total' : 'Schwerstes Gewicht'}</span></div>
+            <div class="legend">${isDist ? '<span><i></i>Distanz pro Training</span>' : isBw
+              ? '<span><i></i>Max. Wdh.</span><span><i class="dash"></i>Wdh. total</span>'
+              : '<span><i></i>Kraftwert (geglättet)</span><span><i class="dot"></i>einzelnes Training</span>'}</div>
             <div class="chart"><canvas id="exChart" role="img" aria-label="Verlauf ${esc(ex.name)}"></canvas></div>
-            <details class="tbl"><summary>Als Tabelle anzeigen</summary><div class="tbl-wrap"><table><thead><tr><th>Datum</th><th>${isBw ? 'Max. Wdh.' : '1RM (kg)'}</th><th>${isBw ? 'Total' : 'Schwerstes (kg)'}</th></tr></thead><tbody>
-              ${[...series].reverse().map((p) => `<tr><td>${esc(formatDate(toISODate(new Date(p.x)), 'short'))}</td><td>${fmtNum(p.primary, 1)}</td><td>${fmtNum(p.secondary, 1)}</td></tr>`).join('')}</tbody></table></div></details>
-            <p class="small muted">${isBw
+            <details class="tbl"><summary>Als Tabelle anzeigen</summary><div class="tbl-wrap"><table><thead><tr><th>Datum</th>${isDist ? '<th>Distanz</th><th>Zeit</th><th>Tempo</th>' : isBw ? '<th>Max. Wdh.</th><th>Total</th>' : '<th>Kraftwert</th><th>Training</th><th>Ø Satz</th>'}</tr></thead><tbody>
+              ${[...series].reverse().map((p) => `<tr><td>${esc(formatDate(toISODate(new Date(p.x)), 'short'))}</td>${isDist
+                ? `<td>${fmtNum(p.primary)} km</td><td>${esc(fmtTime(p.sec) || '–')}</td><td>${p.pace ? esc(p.pace) + ' /km' : '–'}</td>`
+                : isBw
+                ? `<td>${fmtNum(p.primary, 1)}</td><td>${fmtNum(p.secondary, 1)}</td>`
+                : `<td>${fmtNum(p.primary, 1)}</td><td>${fmtNum(p.raw, 1)}</td><td>${fmtNum(p.avgWeight, 1)} kg × ${fmtNum(p.avgReps, 1)}</td>`}</tr>`).join('')}</tbody></table></div></details>
+            <p class="small muted">${isDist
+              ? 'Linie: gelaufene Kilometer pro Training. Tempo = Zeit pro Kilometer.'
+              : isBw
               ? 'Linie: meiste Wiederholungen in einem Satz pro Tag. Gestrichelt: Wiederholungen total.'
-              : 'Linie: geschätztes 1RM (Epley: Gewicht × (1 + Wdh. / 30)), bester Satz pro Tag. Gestrichelt: schwerstes Gewicht.'}</p>`
+              : 'Kraftwert: Gewicht mit Bonus für Wiederholungen. Pro Training zählen alle Sätze, Sätze mit vielen Wiederholungen zählen mehr. Die Linie ist gebremst: Ein einzelnes Ausreisser-Training (z.B. einmal 1×60 statt 8×20) bewegt sie nur wenig. Echter Fortschritt über mehrere Trainings kommt voll an. Die Punkte zeigen die einzelnen Trainings.'}</p>`
           : `<div id="exBest"></div><p class="muted">Keine Sätze im Zeitraum «${esc(r.label)}».</p>`}`
         : '<p class="empty">Sobald du Sätze mit Wiederholungen einträgst, erscheint hier deine Kurve.</p>'}
       </div>
@@ -1548,7 +1598,7 @@ function renderStats() {
       </div>
       ${bests.length ? `<div class="card">
         <div class="eyebrow">Bestwerte</div>
-        <div>${bests.map((b) => `<button class="pr-row" data-action="stats-ex" data-id="${esc(b.e.id)}"><b>${esc(b.e.name)}</b><span class="kg">${esc(setText(b.e, b.top.s))}</span><small>${esc(formatDate(b.top.date, 'short'))}${b.e.type === 'bodyweight' ? '' : ` · 1RM ${fmtNum(e1rmOf(b.top.s), 1)} kg`}</small></button>`).join('')}</div>
+        <div>${bests.map((b) => `<button class="pr-row" data-action="stats-ex" data-id="${esc(b.e.id)}"><b>${esc(b.e.name)}</b><span class="kg">${esc(setText(b.e, b.top.s))}</span><small>${esc(formatDate(b.top.date, 'short'))}</small></button>`).join('')}</div>
       </div>` : ''}
       <div class="card span2">
         <div class="hero"><div><div class="eyebrow">Körpergewicht</div><div class="big">${bwAll.length ? esc(fmtNum(bwAll[0].kg, 1)) : '–'}<small>kg</small></div></div></div>
@@ -1663,8 +1713,7 @@ function renderSettings() {
           </div>
           <div class="ex-row-actions">
             <select class="input" data-field="ex-type" data-id="${esc(e.id)}" aria-label="Typ von ${esc(e.name)}">
-              <option value="weight" ${e.type === 'weight' ? 'selected' : ''}>Gewicht</option>
-              <option value="bodyweight" ${e.type === 'bodyweight' ? 'selected' : ''}>Körpergewicht</option>
+              ${TYPE_KEYS.map((k) => `<option value="${k}" ${e.type === k ? 'selected' : ''}>${TYPE_LABELS[k]}</option>`).join('')}
             </select>
             <button class="btn btn-s btn-sm" data-action="ex-rename" data-id="${esc(e.id)}">Umbenennen</button>
             <button class="btn btn-d btn-sm" data-action="ex-delete" data-id="${esc(e.id)}">Löschen</button>
@@ -1862,8 +1911,8 @@ function bestLabelPlugin(topIdx) {
 }
 
 /**
- * Werte pro Tag für eine Übung berechnen.
- * Gewicht: e1RM (Epley) und schwerstes Gewicht. Körpergewicht: max. und total Wiederholungen.
+ * Körpergewichtsübungen: max. und total Wiederholungen pro Tag.
+ * (Gewichtsübungen: siehe strengthSeries.)
  */
 function exerciseSeries(ex) {
   const start = rangeStartISO();
@@ -1874,24 +1923,92 @@ function exerciseSeries(ex) {
       if (entry.exerciseId !== ex.id) continue;
       for (const s of validSets(entry)) {
         const day = byDay[w.date] || (byDay[w.date] = { primary: 0, secondary: 0, extra: 0 });
-        if (ex.type === 'bodyweight') {
-          day.primary = Math.max(day.primary, s.reps);
-          day.secondary += s.reps;
-          day.extra = Math.max(day.extra, s.weight || 0);
-        } else {
-          const wgt = s.weight || 0;
-          const e1rm = s.reps === 1 ? wgt : wgt * (1 + s.reps / 30);
-          day.primary = Math.max(day.primary, e1rm);
-          day.secondary = Math.max(day.secondary, wgt);
-        }
+        day.primary = Math.max(day.primary, s.reps);
+        day.secondary += s.reps;
+        day.extra = Math.max(day.extra, s.weight || 0);
       }
     }
   }
   return Object.keys(byDay).sort().map((d) => ({
     x: parseISODate(d).getTime(),
-    primary: ex.type === 'bodyweight' ? byDay[d].primary : roundHalf(byDay[d].primary),
+    primary: byDay[d].primary,
     secondary: byDay[d].secondary,
   }));
+}
+
+/**
+ * Gewichtsübungen: Kraftwert pro Training und geglättete Linie.
+ *   Training: Durchschnitt der Kraftwerte aller Sätze, gewichtet nach Wiederholungen
+ *             (8×20 zählt 8-mal, 1×60 nur 1-mal).
+ *   Linie:    gebremst. Ein neues Training zählt halb, und es darf die Linie höchstens um
+ *             15 % gegenüber dem bisherigen Stand ziehen. Ein einzelner Ausreisser
+ *             (z.B. 1×60 zwischen 8×20 und 10×20) bewegt die Linie darum nur wenig,
+ *             echter Fortschritt über mehrere Trainings kommt trotzdem voll an.
+ * Gerechnet wird über alle Trainings, angezeigt nur der gewählte Zeitraum.
+ */
+const SMOOTH_ALPHA = 0.5; // Anteil eines neuen Trainings an der Linie
+const SMOOTH_CAP = 0.15;  // max. Zug pro Training (15 %)
+
+function strengthSeries(ex) {
+  const byDay = {};
+  for (const w of state.data.workouts) {
+    for (const entry of w.entries) {
+      if (entry.exerciseId !== ex.id) continue;
+      for (const s of validSets(entry)) {
+        const day = byDay[w.date] || (byDay[w.date] = { kraft: 0, weight: 0, reps: 0, sets: 0 });
+        day.kraft += kraftOf(s) * s.reps;
+        day.weight += (s.weight || 0) * s.reps;
+        day.reps += s.reps;
+        day.sets += 1;
+      }
+    }
+  }
+  const start = rangeStartISO();
+  const days = Object.keys(byDay).sort();
+  const raw = days.map((d) => byDay[d].kraft / byDay[d].reps);
+  const line = [];
+  raw.forEach((v, i) => {
+    if (i === 0) { line.push(v); return; }
+    const prev = line[i - 1];
+    const capped = Math.min(prev * (1 + SMOOTH_CAP), Math.max(prev * (1 - SMOOTH_CAP), v));
+    line.push(prev + SMOOTH_ALPHA * (capped - prev));
+  });
+  return days.map((d, i) => ({
+    date: d,
+    x: parseISODate(d).getTime(),
+    primary: roundHalf(line[i]),
+    raw: roundHalf(raw[i]),
+    avgWeight: byDay[d].weight / byDay[d].reps,
+    avgReps: byDay[d].reps / byDay[d].sets,
+  })).filter((p) => p.date >= start);
+}
+
+/** Distanz (Laufen): km pro Tag, dazu Zeit und Tempo. */
+function distanceSeries(ex) {
+  const start = rangeStartISO();
+  const byDay = {};
+  for (const w of state.data.workouts) {
+    if (w.date < start) continue;
+    for (const entry of w.entries) {
+      if (entry.exerciseId !== ex.id) continue;
+      for (const s of validSets(entry)) {
+        const day = byDay[w.date] || (byDay[w.date] = { km: 0, sec: 0, kmTimed: 0 });
+        day.km += s.weight || 0;
+        if (s.reps > 0) { day.sec += s.reps; day.kmTimed += s.weight || 0; }
+      }
+    }
+  }
+  return Object.keys(byDay).sort().map((d) => ({
+    x: parseISODate(d).getTime(),
+    primary: Math.round(byDay[d].km * 100) / 100,
+    sec: byDay[d].sec,
+    pace: fmtPace(byDay[d].kmTimed, byDay[d].sec),
+  }));
+}
+
+function seriesFor(ex) {
+  if (ex.type === 'distance') return distanceSeries(ex);
+  return ex.type === 'bodyweight' ? exerciseSeries(ex) : strengthSeries(ex);
 }
 
 function drawExerciseChart() {
@@ -1900,11 +2017,12 @@ function drawExerciseChart() {
   if (!canvas || !ex) return;
 
   const isBw = ex.type === 'bodyweight';
-  const series = exerciseSeries(ex);
+  const isDist = ex.type === 'distance';
+  const series = seriesFor(ex);
   if (!series.length) return;
-  const unit = isBw ? 'Wdh.' : 'kg';
-  const primaryLabel = isBw ? 'Max. Wdh.' : 'Geschätztes 1RM';
-  const secondaryLabel = isBw ? 'Wdh. total' : 'Schwerstes Gewicht';
+  const unit = isDist ? 'km' : isBw ? 'Wdh.' : 'kg';
+  const primaryLabel = isDist ? 'Distanz' : isBw ? 'Max. Wdh.' : 'Kraftwert';
+  const secondaryLabel = isBw ? 'Wdh. total' : 'Training';
 
   const accent = cssVar('--accent');
   const options = baseChartOptions(unit, canvas.parentElement.clientWidth);
@@ -1913,13 +2031,19 @@ function drawExerciseChart() {
   state.charts.exercise = new Chart(canvas, {
     type: 'line',
     data: {
-      datasets: [
+      datasets: isDist ? [main.dataset] : [
         main.dataset,
-        {
+        isBw ? {
           label: secondaryLabel,
           data: series.map((p) => ({ x: p.x, y: p.secondary })),
           borderColor: cssVar('--text-3'), backgroundColor: cssVar('--text-3'),
           borderWidth: 1.5, borderDash: [5, 4], pointRadius: 0, pointHoverRadius: 0, tension: 0, fill: false,
+        } : {
+          // einzelne Trainings als kleine Punkte (ohne Linie)
+          label: secondaryLabel,
+          data: series.map((p) => ({ x: p.x, y: p.raw })),
+          showLine: false, pointRadius: 3, pointHoverRadius: 4,
+          pointBackgroundColor: withAlpha(cssVar('--text-2'), 0.55), pointBorderWidth: 0, fill: false,
         },
       ],
     },
@@ -2012,7 +2136,7 @@ function startRest(sec, label) {
   tick();
 }
 function hideRest() { const r = $('#rest'); if (r) r.hidden = true; }
-function restSecondsFor(ex) { return /kniebeuge|kreuzheben|squat|deadlift/i.test(ex.name) ? 150 : 90; }
+function restSecondsFor() { return 120; } // V3: immer 2 Minuten
 
 function tick() {
   if (!state.data) return;
@@ -2099,6 +2223,9 @@ function finishWorkout() {
   const w = activeWorkout();
   state.naming = false;
   state.summary = w && w.entries.length ? workoutSummary(w) : null;
+  // Dauer einmalig merken (beim späteren Bearbeiten nicht überschreiben)
+  const storeDuration = !!(w && state.summary && state.summary.min !== null && state.summary.min > 0 && !w.durationMin);
+  if (storeDuration) w.durationMin = state.summary.min;
   state.meta.activeWorkoutId = null;
   state.meta.doneSets = {};
   state.focus = null;
@@ -2108,7 +2235,7 @@ function finishWorkout() {
     state.data.workouts = state.data.workouts.filter((x) => x.id !== w.id);
     commit();
   } else {
-    saveCache();
+    if (storeDuration) commit(); else saveCache();
     if (w) toast('Training gespeichert');
   }
   render();
@@ -2176,8 +2303,8 @@ const moreActions = {
     render();
   },
 
-  'w-inc': (el) => stepWeight(el, +WEIGHT_STEP),
-  'w-dec': (el) => stepWeight(el, -WEIGHT_STEP),
+  'w-inc': (el) => stepWeight(el, +1),
+  'w-dec': (el) => stepWeight(el, -1),
   'r-inc': (el) => stepReps(el, +1),
   'r-dec': (el) => stepReps(el, -1),
 
@@ -2197,7 +2324,7 @@ const moreActions = {
       const set = entry.sets[i];
       pr = isPR(ex, set, true, bestScores(w.id));
       if (pr) toast(`Neuer Rekord: ${ex.name} ${setText(ex, set)}`);
-      startRest(restSecondsFor(ex), `Satz ${i + 1}`);
+      if (ex.type !== 'distance') startRest(restSecondsFor(ex), `Satz ${i + 1}`);
     }
     render();
     if (done) {
@@ -2325,10 +2452,13 @@ const moreActions = {
 };
 Object.assign(actions, moreActions);
 
-function stepWeight(el, delta) {
+function entryIsDistance(entry) { const ex = getExercise(entry.exerciseId); return !!(ex && ex.type === 'distance'); }
+
+function stepWeight(el, dir) {
   const entry = findEntry(el.dataset.entry);
   const i = Number(el.dataset.set);
   if (!entry || !entry.sets[i]) return;
+  const delta = dir * (entryIsDistance(entry) ? KM_STEP : WEIGHT_STEP);
   const current = entry.sets[i].weight || 0;
   const next = Math.max(0, Math.round((current + delta) * 100) / 100);
   entry.sets[i].weight = next;
@@ -2338,14 +2468,15 @@ function stepWeight(el, delta) {
   refreshSession();
 }
 
-function stepReps(el, delta) {
+function stepReps(el, dir) {
   const entry = findEntry(el.dataset.entry);
   const i = Number(el.dataset.set);
   if (!entry || !entry.sets[i]) return;
-  const next = Math.max(0, Math.round((entry.sets[i].reps || 0) + delta));
+  const dist = entryIsDistance(entry);
+  const next = Math.max(0, Math.round((entry.sets[i].reps || 0) + dir * (dist ? TIME_STEP : 1)));
   entry.sets[i].reps = next;
-  const input = $(`[data-field="set-reps"][data-entry="${CSS.escape(entry.id)}"][data-set="${i}"]`);
-  if (input) input.value = fmtNum(next, 0);
+  const input = $(`[data-field="${dist ? 'set-time' : 'set-reps'}"][data-entry="${CSS.escape(entry.id)}"][data-set="${i}"]`);
+  if (input) input.value = dist ? fmtTime(next) : fmtNum(next, 0);
   commit();
   refreshSession();
 }
@@ -2431,7 +2562,7 @@ const forms = {
     if (!w || !name) return;
     let ex = findExerciseByName(name);
     if (!ex) {
-      ex = { id: uid(), name, type: form.type.value === 'bodyweight' ? 'bodyweight' : 'weight', variant: '' };
+      ex = { id: uid(), name, type: TYPE_KEYS.includes(form.type.value) ? form.type.value : 'weight', variant: '' };
       state.data.exercises.push(ex);
     }
     if (w.entries.some((e) => e.exerciseId === ex.id)) { toast('Ist schon im Training'); return; }
@@ -2574,6 +2705,15 @@ function onFieldInput(el) {
     set[field === 'set-weight' ? 'weight' : 'reps'] = value;
     commit();
     refreshSession();
+  } else if (field === 'set-time') {
+    const entry = findEntry(el.dataset.entry);
+    const set = entry && entry.sets[Number(el.dataset.set)];
+    if (!set) return;
+    const sec = parseTime(el.value);
+    if (sec === null && el.value.trim() !== '') return; // noch am Tippen / ungültig → nichts ändern
+    set.reps = sec;
+    commit();
+    refreshSession();
   } else if (field === 'workout-name' && w) {
     w.name = el.value.trim().slice(0, NAME_MAX);
     commit();
@@ -2592,7 +2732,12 @@ function onFieldInput(el) {
 
 function onFieldChange(el) {
   const field = el.dataset.field;
-  if (field === 'workout-date') {
+  if (field === 'set-time') {
+    // nach dem Verlassen des Felds schön formatieren (z.B. "25.3" → "25:03")
+    const entry = findEntry(el.dataset.entry);
+    const set = entry && entry.sets[Number(el.dataset.set)];
+    if (set) el.value = fmtTime(set.reps);
+  } else if (field === 'workout-date') {
     const w = activeWorkout();
     if (w && isValidISODate(el.value)) { w.date = el.value; commit(); render(); }
   } else if (field === 'stats-exercise') {
@@ -2600,7 +2745,7 @@ function onFieldChange(el) {
     render();
   } else if (field === 'ex-type') {
     const ex = getExercise(el.dataset.id);
-    if (ex) { ex.type = el.value === 'bodyweight' ? 'bodyweight' : 'weight'; commit(); }
+    if (ex) { ex.type = TYPE_KEYS.includes(el.value) ? el.value : 'weight'; commit(); render(); }
   }
 }
 
