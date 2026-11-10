@@ -68,6 +68,7 @@ const PALETTES = [
   ['orange', 'Orange', 'Kräftig und warm, viel Energie.'],
   ['cyan', 'Cyan', 'Klares Türkisblau, ruhig und modern.'],
   ['violett', 'Violett', 'Sattes Violett, eigenständig.'],
+  ['rot', 'Rot', 'Kräftiges Rot, am meisten Power.'],
 ];
 
 const SYNC_LABELS = {
@@ -114,7 +115,8 @@ const state = {
   statsExerciseId: null,
   focus: null,                // aktueller Satz im Training { entry, set } (nur Anzeige)
   summary: null,              // Zusammenfassung nach «Fertig» (nur Anzeige)
-  naming: false,              // true = nach «Fertig»: Name fürs Training wählen
+  naming: false,
+  settingsExId: null,         // unter «Mehr → Übungen» gewählte Übung (nur Anzeige)              // true = nach «Fertig»: Name fürs Training wählen
   charts: {},                 // aktive Chart.js-Instanzen
   sync: {
     configured: false,
@@ -1705,11 +1707,18 @@ function renderSettings() {
 
     <div class="card">
       <h2>Übungen</h2>
-      ${exercises.length ? `<div>${exercises.map((e) => `
+      ${exercises.length ? (() => {
+        if (!exercises.some((e) => e.id === state.settingsExId)) state.settingsExId = exercises[0].id;
+        const e = getExercise(state.settingsExId);
+        const uses = exerciseUseCount(e.id);
+        return `
+        <select class="input" data-field="settings-ex" aria-label="Übung wählen">
+          ${exercises.map((x) => `<option value="${esc(x.id)}" ${x.id === e.id ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}
+        </select>
         <div class="ex-row">
           <div class="ex-row-top">
             <span class="grow">${esc(e.name)}</span>
-            <span class="small muted tnum">${exerciseUseCount(e.id)}×</span>
+            <span class="small muted tnum">${uses} ${uses === 1 ? 'Training' : 'Trainings'}</span>
           </div>
           <div class="ex-row-actions">
             <select class="input" data-field="ex-type" data-id="${esc(e.id)}" aria-label="Typ von ${esc(e.name)}">
@@ -1718,7 +1727,8 @@ function renderSettings() {
             <button class="btn btn-s btn-sm" data-action="ex-rename" data-id="${esc(e.id)}">Umbenennen</button>
             <button class="btn btn-d btn-sm" data-action="ex-delete" data-id="${esc(e.id)}">Löschen</button>
           </div>
-        </div>`).join('')}</div>`
+        </div>`;
+      })()
       : '<p class="empty">Noch keine Übungen. Du legst sie beim Training an.</p>'}
     </div>
 
@@ -2740,6 +2750,9 @@ function onFieldChange(el) {
   } else if (field === 'workout-date') {
     const w = activeWorkout();
     if (w && isValidISODate(el.value)) { w.date = el.value; commit(); render(); }
+  } else if (field === 'settings-ex') {
+    state.settingsExId = el.value;
+    render();
   } else if (field === 'stats-exercise') {
     state.statsExerciseId = el.value;
     render();

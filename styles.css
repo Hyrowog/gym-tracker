@@ -28,6 +28,11 @@ html:root[data-theme="light"] { color-scheme: light; }
   --line: light-dark(#cfdcde, #2a3639); --text: light-dark(#10191b, #ebf4f5); --text-2: light-dark(#415356, #aebec1);
   --text-3: light-dark(#586b6e, #87989b); --accent: light-dark(#00737f, #3fd8e8); --accent-ink: light-dark(#ffffff, #032a30);
 }
+[data-palette="rot"] {
+  --bg: light-dark(#f6efef, #140e0f); --surface: light-dark(#ffffff, #1d1617); --surface-2: light-dark(#ede3e4, #2a2021); --line: light-dark(#e0d3d4, #382b2d);
+  --text: light-dark(#1f1416, #f6edee); --text-2: light-dark(#5a4548, #c4b2b5); --text-3: light-dark(#755d61, #9c878a);
+  --accent: light-dark(#c4182f, #ff4d5e); --accent-ink: light-dark(#ffffff, #2b0207);
+}
 [data-palette="violett"] {
   --bg: light-dark(#f3f0f8, #110e17); --surface: light-dark(#ffffff, #1a1622); --surface-2: light-dark(#e9e4f2, #252030);
   --line: light-dark(#dad3e8, #322b40); --text: light-dark(#1a1524, #f2eef8); --text-2: light-dark(#4d4560, #bdb4cc);
@@ -465,3 +470,6 @@ body.read-only .sync-pill { visibility: hidden; }
 
 /* Laufen: «Zuletzt» zweizeilig (km / Zeit) */
 .set-prev.two { white-space: pre-line; line-height: 1.2; font-size: 12px; }
+
+/* Mehr → Übungen: Auswahl per Dropdown */
+.ex-row:first-of-type { border-top: 0; padding-top: 0; }
