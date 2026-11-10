@@ -342,4 +342,38 @@ th { font-weight: 650; color: var(--text-3); border-top: 0; }
 .divider { display: flex; align-items: center; gap: 12px; color: var(--text-3); font-size: 13px; }
 .divider::before, .divider::after { content: ""; flex: 1; border-top: 1px solid var(--line); }
 
+/* ---------- V2: Login, Konto, Admin ---------- */
+.gate .gate-info { color: var(--done); font-weight: 600; }
+.gate .card p { color: var(--text-2); }
+.link-btn { display: inline; padding: 0; border: 0; background: none; color: var(--accent); font-weight: 600; text-decoration: underline; text-underline-offset: 3px; }
+.gate-actions .link-btn { align-self: center; min-height: var(--tap); font-size: 14px; }
+.inline-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+.acc-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: end; }
+.acc-pw summary { cursor: pointer; font-weight: 600; color: var(--text-2); min-height: var(--tap); display: flex; align-items: center; }
+.acc-pw[open] summary { margin-bottom: 8px; }
+.badge-soft { padding: 2px 8px; border-radius: 6px; background: var(--surface-2); color: var(--text-3); font-size: 12px; font-weight: 600; }
+
+/* Admin: fremdes Konto ansehen */
+.viewas { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px 10px 14px; border-radius: var(--r); background: var(--pr-soft); border: 1px solid color-mix(in srgb, var(--pr) 35%, transparent); }
+.viewas > div { display: flex; flex-direction: column; min-width: 0; }
+.viewas .eyebrow { color: var(--pr); }
+.viewas b { font-weight: 650; overflow-wrap: anywhere; }
+body.read-only .nav button[data-view="training"],
+body.read-only .nav button[data-view="settings"] { display: none; }
+body.read-only .nav { grid-template-columns: repeat(2, 1fr); }
+body.read-only .sync-pill { visibility: hidden; }
+
+/* Admin: Kontenliste */
+.users { padding: 4px 14px; gap: 0; }
+.user-row { display: grid; grid-template-columns: 36px minmax(0, 1fr) auto; gap: 12px; align-items: center; width: 100%; padding: 12px 0; border: 0; border-top: 1px solid var(--line); background: none; text-align: left; }
+.user-row:first-child { border-top: 0; }
+.user-row:disabled { opacity: 1; cursor: default; }
+.user-av { width: 36px; height: 36px; border-radius: 50%; display: grid; place-items: center; background: var(--accent-soft); color: var(--accent); font-weight: 700; }
+.user-main { display: flex; flex-direction: column; min-width: 0; }
+.user-main b { font-weight: 650; overflow-wrap: anywhere; }
+.user-main small, .user-stat small { color: var(--text-3); font-size: 12.5px; overflow-wrap: anywhere; }
+.user-stat { display: flex; flex-direction: column; align-items: flex-end; text-align: right; }
+.user-stat b { font-size: 18px; font-weight: 700; }
+.user-row:not(:disabled):hover .user-main b { color: var(--accent); }
+
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }

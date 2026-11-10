@@ -5,12 +5,16 @@
      1. Konstanten & Zustand
      2. Hilfsfunktionen (Datum, Zahlen, HTML)
      3. Datenmodell & lokaler Speicher (localStorage)
-     4. Sync mit Supabase
-     5. Schlüssel im Link (?k=...) & Startbildschirm
-     6. Ansichten (Training, Verlauf, Fortschritt, Mehr)
+     4. Sync mit Supabase (pro Konto)
+     5. Login, Registrierung & Startbildschirm (Supabase Auth)
+     6. Ansichten (Training, Verlauf, Fortschritt, Mehr, Admin)
      7. Diagramme & Heatmap
      8. Aktionen (Klicks, Eingaben)
      9. Start
+
+   Version 2: Login mit eigenem Konto (E-Mail + Passwort). Registrieren nur
+   über einen Einladungslink (?invite=CODE). Jedes Konto sieht nur seine
+   eigenen Daten; Admins können alle Konten lesend ansehen.
 
    Datenformat (wird 1:1 als JSON gespeichert und synchronisiert):
    {
@@ -61,16 +65,39 @@ const SYNC_LABELS = {
   offline: 'Offline · lokal gespeichert',
 };
 
+const INVITE_KEY = STORAGE_PREFIX + 'invite';      // Einladungscode aus dem Link (sessionStorage)
+const INVITE_PATTERN = /^[A-Za-z0-9_-]{6,64}$/;
+const MIN_PASSWORD = 8;
+
+/* Aktionen, die beim Ansehen eines fremden Kontos (Admin, nur lesen) erlaubt sind */
+const READONLY_ACTIONS = new Set(['nav', 'stats-ex', 'set-range', 'admin-exit', 'set-theme', 'set-palette']);
+
 const state = {
-  secret: null,
+  userId: null,               // angemeldetes Konto (Supabase-User-ID)
   data: null,                 // synchronisierte Daten (siehe Format oben)
   meta: {                     // nur lokal (pro Gerät), wird nicht synchronisiert
     dirty: false,             // true = lokale Änderungen noch nicht auf dem Server
     lastSyncedAt: null,
     activeWorkoutId: null,    // Training, das gerade bearbeitet wird
-    showLinkHint: false,      // Hinweis "Link speichern" nach dem Erstellen
+    profile: null,            // { email, display_name, is_admin } (Kopie für offline)
   },
-  prefs: { theme: 'dark', palette: 'stahl', range: '3m', lastSecret: null },
+  prefs: { theme: 'dark', palette: 'stahl', range: '3m', lastSecret: null, lastUserId: null },
+  auth: {
+    client: null,
+    recovery: false,          // true = über «Passwort vergessen»-Link gekommen
+    gateMode: 'login',        // login | register | registered | forgot | forgot-sent | reset | offline
+    gateEmail: '',
+    gateName: '',
+    busy: false,
+    pendingError: '',         // Fehler aus einem Mail-Link, wird im Login angezeigt
+    checkingSession: false,
+  },
+  admin: {
+    users: null,              // Liste aller Konten (nur Admin)
+    inviteCode: null,
+    viewAs: null,             // { id, name } = fremdes Konto wird angesehen (nur lesen)
+    ownData: null,            // eigene Daten, solange ein fremdes Konto angezeigt wird
+  },
   view: 'training',
   statsExerciseId: null,
   focus: null,                // aktueller Satz im Training { entry, set } (nur Anzeige)
@@ -105,15 +132,6 @@ function esc(value) {
 function uid() {
   if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
-}
-
-/** Zufälliger, URL-tauglicher Schlüssel (32 Zeichen, 192 Bit). */
-function randomSecret() {
-  const bytes = new Uint8Array(24);
-  crypto.getRandomValues(bytes);
-  let bin = '';
-  bytes.forEach((b) => { bin += String.fromCharCode(b); });
-  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
 /** Date → "YYYY-MM-DD" (lokale Zeit, nicht UTC). */
@@ -244,7 +262,7 @@ function normalizeData(raw) {
   return { version: 1, updatedAt: raw.updatedAt || null, exercises, workouts, bodyweight };
 }
 
-function cacheKey() { return STORAGE_PREFIX + 'data:' + state.secret; }
+function cacheKey(userId = state.userId) { return STORAGE_PREFIX + 'user:' + userId; }
 
 function loadCache() {
   try {
@@ -259,6 +277,7 @@ function loadCache() {
 }
 
 function saveCache() {
+  if (state.admin.viewAs || !state.userId) return; // fremde Daten nie lokal speichern
   try {
     localStorage.setItem(cacheKey(), JSON.stringify({ data: state.data, meta: state.meta }));
   } catch (err) {
@@ -275,6 +294,7 @@ function savePrefs() {
 
 /** Nach jeder Änderung an state.data aufrufen: speichert lokal und synchronisiert. */
 function commit() {
+  if (state.admin.viewAs) { toast('Nur ansehen – fremdes Konto'); return; }
   state.data.updatedAt = new Date().toISOString();
   state.meta.dirty = true;
   saveCache();
@@ -383,22 +403,29 @@ function startWorkout(mode) {
      - Solange der Server nie erfolgreich gelesen wurde, wird NICHT
        hochgeladen (damit nie leere Daten den Server überschreiben).
    --------------------------------------------------------------------- */
-function initSync() {
+/** Prüft config.js und ob die Supabase-Bibliothek geladen ist. */
+function configCheck() {
   const cfg = window.GYM_CONFIG || {};
   const urlOk = typeof cfg.supabaseUrl === 'string' && /^https:\/\/[^\s]+$/.test(cfg.supabaseUrl);
   const keyOk = typeof cfg.supabaseAnonKey === 'string' && cfg.supabaseAnonKey.length > 20 && !cfg.supabaseAnonKey.startsWith('DEIN');
   const libOk = !!(window.supabase && window.supabase.createClient);
+  return { cfg, configOk: urlOk && keyOk, libOk };
+}
 
-  state.sync.configured = urlOk && keyOk && libOk;
-  if (state.sync.configured) {
-    state.sync.client = window.supabase.createClient(cfg.supabaseUrl, cfg.supabaseAnonKey, {
-      auth: { persistSession: false, autoRefreshToken: false },
-    });
-    setSyncStatus(state.meta.dirty ? 'syncing' : 'synced');
-  } else {
-    if (urlOk && keyOk && !libOk) console.warn('Supabase-Bibliothek nicht geladen (offline?)');
-    setSyncStatus('local');
-  }
+/** Sync für das angemeldete Konto einschalten (Client kommt aus dem Login). */
+function initSync() {
+  state.sync.client = state.auth.client;
+  state.sync.configured = !!state.auth.client;
+  state.sync.serverChecked = false;
+  state.sync.serverHadData = false;
+  if (state.sync.configured) setSyncStatus(state.meta.dirty ? 'syncing' : 'synced');
+  else setSyncStatus('offline');
+}
+
+/** Fehler vom Server, die bedeuten: Sitzung abgelaufen → neu anmelden. */
+function isAuthError(err) {
+  const msg = String((err && (err.message || err.msg)) || '');
+  return /not authenticated|JWT|jwt expired|invalid claim/i.test(msg) || (err && (err.status === 401 || err.code === 'PGRST301'));
 }
 
 function setSyncStatus(status) {
@@ -407,8 +434,8 @@ function setSyncStatus(status) {
   if (!pill) return;
   pill.dataset.status = status;
   $('.sync-label', pill).textContent = SYNC_LABELS[status] || status;
-  pill.title = status === 'local'
-    ? 'Daten liegen nur in diesem Browser. Siehe SETUP.md.'
+  pill.title = status === 'offline' && !state.sync.configured
+    ? 'Keine Verbindung zum Server. Änderungen werden später hochgeladen.'
     : (state.meta.lastSyncedAt ? 'Zuletzt synchronisiert: ' + new Date(state.meta.lastSyncedAt).toLocaleString('de-CH') : '');
   if (state.view === 'settings') {
     const s = $('#syncStatusText');
@@ -418,12 +445,15 @@ function setSyncStatus(status) {
 
 /** Server lesen und mit lokalem Stand abgleichen. */
 async function pullFromServer() {
-  if (!state.sync.configured || state.sync.pulling) return;
+  if (!state.sync.configured || state.sync.pulling || state.admin.viewAs || !state.userId) return;
+  const userAtStart = state.userId;
   state.sync.pulling = true;
   setSyncStatus('syncing');
   try {
-    const { data: row, error } = await state.sync.client.rpc('get_gym_data', { p_secret: state.secret });
+    const { data: row, error } = await state.sync.client.rpc('get_my_data');
     if (error) throw error;
+    // Während der Abfrage abgemeldet oder in ein fremdes Konto gewechselt → verwerfen
+    if (state.userId !== userAtStart || state.admin.viewAs) return;
     state.sync.serverChecked = true;
 
     if (!row || !row.data) {
@@ -474,6 +504,7 @@ async function pullFromServer() {
   } catch (err) {
     console.warn('Server nicht erreichbar', err);
     setSyncStatus('offline');
+    if (isAuthError(err)) handleExpiredSession();
   } finally {
     state.sync.pulling = false;
   }
@@ -513,7 +544,7 @@ function scheduleSync() {
 /** Lokale Daten auf den Server schreiben. */
 async function pushToServer() {
   clearTimeout(state.sync.pushTimer);
-  if (!state.sync.configured) return;
+  if (!state.sync.configured || state.admin.viewAs || !state.userId) return;
   if (!state.sync.serverChecked) {
     // Erst den Server lesen; pullFromServer lädt bei Bedarf selbst hoch.
     await pullFromServer();
@@ -532,8 +563,10 @@ async function pushToServer() {
   setSyncStatus('syncing');
   const snapshotTime = state.data.updatedAt;
   try {
-    const { error } = await state.sync.client.rpc('save_gym_data', { p_secret: state.secret, p_data: state.data });
+    const userAtStart = state.userId;
+    const { error } = await state.sync.client.rpc('save_my_data', { p_data: state.data });
     if (error) throw error;
+    if (state.userId !== userAtStart) return;
     state.sync.allowEmptyOnce = false;
     state.sync.serverHadData = !isEmptyData(state.data);
     if (state.data.updatedAt === snapshotTime) state.meta.dirty = false;
@@ -543,6 +576,7 @@ async function pushToServer() {
   } catch (err) {
     console.warn('Speichern auf Server fehlgeschlagen', err);
     setSyncStatus('offline');
+    if (isAuthError(err)) handleExpiredSession();
   } finally {
     state.sync.pushing = false;
     if (state.sync.pushAgain || (state.meta.dirty && state.sync.status !== 'offline')) {
@@ -554,27 +588,326 @@ async function pushToServer() {
 
 /** Abgleich bei Rückkehr in die App, Netzwerk wieder da oder periodisch. */
 function syncNow() {
-  if (!state.sync.configured) return;
+  if (!state.sync.configured || state.admin.viewAs || !state.userId) return;
   if (state.meta.dirty && state.sync.serverChecked) pushToServer();
   else pullFromServer();
 }
 
 /* ---------------------------------------------------------------------
-   5. Schlüssel im Link & Startbildschirm
+   5. Login, Registrierung & Startbildschirm
+   Supabase Auth mit E-Mail + Passwort. Die Sitzung bleibt im Browser
+   gespeichert (man bleibt angemeldet). Registrieren nur mit Einladungscode
+   aus dem Link ?invite=CODE; die Datenbank prüft den Code selbst.
    --------------------------------------------------------------------- */
-function getSecretFromUrl() {
-  const k = new URLSearchParams(location.search).get('k');
-  return k && SECRET_PATTERN.test(k) ? k : (k ? false : null); // false = ungültig
+function appUrl() {
+  return location.origin + location.pathname;
 }
 
-function personalLink() {
-  const url = new URL(location.href);
-  url.search = '';
-  url.hash = '';
-  url.searchParams.set('k', state.secret);
+function inviteLink(code) {
+  const url = new URL(appUrl());
+  url.searchParams.set('invite', code);
   return url.toString();
 }
 
+function getInvite() {
+  try { return sessionStorage.getItem(INVITE_KEY) || ''; } catch { return ''; }
+}
+function setInvite(code) {
+  try {
+    if (code) sessionStorage.setItem(INVITE_KEY, code);
+    else sessionStorage.removeItem(INVITE_KEY);
+  } catch { /* egal */ }
+}
+
+/** ?invite=CODE aus der Adresse lesen, merken und aus der Adresse entfernen. */
+function readInviteFromUrl() {
+  const params = new URLSearchParams(location.search);
+  const code = params.get('invite');
+  if (code === null) return;
+  if (INVITE_PATTERN.test(code)) {
+    setInvite(code);
+    state.auth.gateMode = 'register';
+  }
+  params.delete('invite');
+  const q = params.toString();
+  history.replaceState(null, '', appUrl() + (q ? '?' + q : '') + location.hash);
+}
+
+/** Fehler aus Mail-Links (z.B. abgelaufen) lesen: #error=...&error_code=... */
+function readHashError() {
+  const hash = new URLSearchParams(location.hash.replace(/^#/, ''));
+  if (!hash.get('error') && !hash.get('error_code')) return '';
+  history.replaceState(null, '', location.pathname + location.search);
+  const code = hash.get('error_code') || '';
+  if (code === 'otp_expired') return 'Der Link ist abgelaufen oder wurde schon benutzt. Melde dich an oder fordere einen neuen Link an.';
+  return 'Der Link hat nicht funktioniert. Bitte nochmals versuchen.';
+}
+
+/** Fehlermeldungen von Supabase Auth auf Deutsch. */
+function authErrorText(err) {
+  const code = (err && err.code) || '';
+  const msg = String((err && err.message) || '');
+  if (code === 'invalid_credentials' || /invalid login credentials/i.test(msg)) return 'E-Mail oder Passwort ist falsch.';
+  if (code === 'email_not_confirmed' || /email not confirmed/i.test(msg)) return 'Bitte bestätige zuerst deine E-Mail-Adresse (Link im Postfach).';
+  if (code === 'user_already_exists' || /already registered/i.test(msg)) return 'Für diese E-Mail gibt es schon ein Konto. Melde dich an.';
+  if (code === 'weak_password' || /password should be/i.test(msg)) return `Das Passwort ist zu schwach. Mindestens ${MIN_PASSWORD} Zeichen.`;
+  if (/rate limit|over_email_send_rate_limit|too many/i.test(code + ' ' + msg)) return 'Zu viele Versuche in kurzer Zeit. Bitte in ein paar Minuten nochmals.';
+  if (/Database error saving new user|invalid invite/i.test(msg)) return 'Der Einladungscode ist ungültig. Frag nach einem neuen Einladungslink.';
+  if (/email address .* invalid|invalid email|validate email/i.test(msg)) return 'Diese E-Mail-Adresse ist ungültig.';
+  if (/not authorized/i.test(msg)) return 'An diese Adresse kann der Server keine E-Mail schicken (E-Mail-Versand nicht eingerichtet).';
+  if (/fetch|network|Failed to/i.test(msg)) return 'Keine Verbindung zum Server. Bist du online?';
+  return 'Das hat nicht geklappt: ' + (msg || 'unbekannter Fehler');
+}
+
+function gateBrand() {
+  return `
+    <div class="gate-brand">
+      <span class="logo"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9v6M7 7v10M17 7v10M20 9v6M7 12h10"/></svg></span>
+      <h1 class="title">Gym-Tracker</h1>
+    </div>`;
+}
+
+function renderGate(errorText = '', infoText = '') {
+  const gate = $('#gate');
+  const a = state.auth;
+  const invite = getInvite();
+  const err = errorText ? `<p class="error" role="alert">${esc(errorText)}</p>` : '';
+  const info = infoText ? `<p class="gate-info" role="status">${esc(infoText)}</p>` : '';
+  const email = esc(a.gateEmail);
+  const busy = a.busy ? 'disabled' : '';
+  let body = '';
+
+  if (a.gateMode === 'register' && invite) {
+    body = `
+      <p>Du wurdest eingeladen. Erstelle dein Konto, danach trackst du dein Training auf Handy und PC.</p>
+      ${err}${info}
+      <form class="gate-actions card" data-form="register" novalidate>
+        <label class="field">Vorname oder Spitzname
+          <input class="input" name="name" autocomplete="nickname" maxlength="60" value="${esc(a.gateName)}" required>
+        </label>
+        <label class="field">E-Mail
+          <input class="input" name="email" type="email" autocomplete="email" autocapitalize="off" spellcheck="false" value="${email}" required>
+        </label>
+        <label class="field">Passwort (mind. ${MIN_PASSWORD} Zeichen)
+          <input class="input" name="password" type="password" autocomplete="new-password" minlength="${MIN_PASSWORD}" required>
+        </label>
+        <p class="small muted">Hinweis: Der Betreiber dieses Trackers kann deine Trainingsdaten einsehen (nur lesen). Andere Nutzer sehen nichts.</p>
+        <button class="btn btn-p block" type="submit" ${busy}>${a.busy ? 'Einen Moment …' : 'Konto erstellen'}</button>
+      </form>
+      <p class="small muted">Schon ein Konto? <button class="link-btn" data-action="gate-mode" data-mode="login">Anmelden</button></p>`;
+  } else if (a.gateMode === 'registered') {
+    body = `
+      <div class="card">
+        <h2>Fast geschafft</h2>
+        <p class="muted">Wir haben dir eine E-Mail an <b>${email}</b> geschickt. Klicke auf den Link darin, um dein Konto zu bestätigen. Danach kannst du dich anmelden.</p>
+        <p class="small muted">Keine Mail? Schau im Spam-Ordner nach.</p>
+        <div class="row-2">
+          <button class="btn btn-s" data-action="resend-confirm" ${busy}>Nochmals senden</button>
+          <button class="btn btn-p" data-action="gate-mode" data-mode="login">Zum Login</button>
+        </div>
+      </div>
+      ${err}${info}`;
+  } else if (a.gateMode === 'forgot') {
+    body = `
+      <p>Gib deine E-Mail ein. Du bekommst einen Link, mit dem du ein neues Passwort setzen kannst.</p>
+      ${err}${info}
+      <form class="gate-actions card" data-form="forgot" novalidate>
+        <label class="field">E-Mail
+          <input class="input" name="email" type="email" autocomplete="email" autocapitalize="off" spellcheck="false" value="${email}" required>
+        </label>
+        <button class="btn btn-p block" type="submit" ${busy}>${a.busy ? 'Einen Moment …' : 'Link senden'}</button>
+      </form>
+      <p class="small muted"><button class="link-btn" data-action="gate-mode" data-mode="login">Zurück zum Login</button></p>`;
+  } else if (a.gateMode === 'forgot-sent') {
+    body = `
+      <div class="card">
+        <h2>E-Mail ist unterwegs</h2>
+        <p class="muted">Falls es ein Konto für <b>${email}</b> gibt, kommt gleich eine E-Mail mit einem Link zum Zurücksetzen. Den Link am besten auf dem Gerät öffnen, auf dem du das neue Passwort setzen willst.</p>
+        <button class="btn btn-p" data-action="gate-mode" data-mode="login">Zum Login</button>
+      </div>`;
+  } else if (a.gateMode === 'reset') {
+    body = `
+      <p>Setze jetzt dein neues Passwort.</p>
+      ${err}${info}
+      <form class="gate-actions card" data-form="reset" novalidate>
+        <label class="field">Neues Passwort (mind. ${MIN_PASSWORD} Zeichen)
+          <input class="input" name="password" type="password" autocomplete="new-password" minlength="${MIN_PASSWORD}" required>
+        </label>
+        <label class="field">Passwort wiederholen
+          <input class="input" name="password2" type="password" autocomplete="new-password" minlength="${MIN_PASSWORD}" required>
+        </label>
+        <button class="btn btn-p block" type="submit" ${busy}>${a.busy ? 'Einen Moment …' : 'Passwort speichern'}</button>
+      </form>`;
+  } else if (a.gateMode === 'offline') {
+    const canOffline = state.prefs.lastUserId && localStorage.getItem(cacheKey(state.prefs.lastUserId));
+    body = `
+      ${err || '<p class="error" role="alert">Keine Verbindung zum Server.</p>'}
+      <p>Lade die Seite neu, sobald du wieder Internet hast.</p>
+      <div class="gate-actions">
+        <button class="btn btn-p block" data-action="reload">Neu laden</button>
+        ${canOffline ? '<button class="btn btn-s block" data-action="gate-offline">Offline weiter (zuletzt angemeldetes Konto)</button>' : ''}
+      </div>
+      ${canOffline ? '<p class="small muted">Offline eingetragene Sätze werden hochgeladen, sobald du die Seite mit Internet neu lädst.</p>' : ''}`;
+  } else {
+    // Login
+    body = `
+      ${err}${info}
+      <form class="gate-actions card" data-form="login" novalidate>
+        <label class="field">E-Mail
+          <input class="input" name="email" type="email" autocomplete="username" autocapitalize="off" spellcheck="false" value="${email}" required>
+        </label>
+        <label class="field">Passwort
+          <input class="input" name="password" type="password" autocomplete="current-password" required>
+        </label>
+        <button class="btn btn-p block" type="submit" ${busy}>${a.busy ? 'Einen Moment …' : 'Anmelden'}</button>
+        <button class="link-btn" type="button" data-action="gate-mode" data-mode="forgot">Passwort vergessen?</button>
+      </form>
+      ${invite
+        ? '<p class="small muted">Neu hier? <button class="link-btn" data-action="gate-mode" data-mode="register">Konto erstellen</button></p>'
+        : '<p class="small muted">Neu hier? Für ein Konto brauchst du einen Einladungslink.</p>'}`;
+  }
+
+  gate.innerHTML = gateBrand() + body;
+  $('#app').hidden = true;
+  gate.hidden = false;
+  const first = gate.querySelector('input:not([value]), input[value=""]') || gate.querySelector('input');
+  if (first && !a.busy && window.matchMedia('(min-width: 900px)').matches) first.focus();
+}
+
+function setGate(mode, errorText = '', infoText = '') {
+  state.auth.gateMode = mode;
+  renderGate(errorText, infoText);
+}
+
+/** Läuft eine Auth-Aktion: Knopf sperren, Fehler anzeigen. */
+async function gateTask(fn) {
+  if (state.auth.busy) return;
+  state.auth.busy = true;
+  renderGate();
+  let errorText = '';
+  let infoText = '';
+  try {
+    const res = await fn();
+    if (res && res.info) infoText = res.info;
+  } catch (err) {
+    console.warn(err);
+    errorText = err && err.userText ? err.userText : authErrorText(err);
+  } finally {
+    state.auth.busy = false;
+  }
+  if (!$('#gate').hidden) renderGate(errorText, infoText);
+}
+
+function userError(text) {
+  const e = new Error(text);
+  e.userText = text;
+  return e;
+}
+
+/** Reaktion auf Login/Logout/Passwort-Link (von Supabase gemeldet). */
+function handleAuthEvent(event, session) {
+  if (event === 'PASSWORD_RECOVERY') {
+    state.auth.recovery = true;
+    history.replaceState(null, '', location.pathname + location.search);
+    setGate('reset');
+    return;
+  }
+  if (event === 'SIGNED_OUT') {
+    if (state.userId) stopApp();
+    setGate('login');
+    return;
+  }
+  if (state.auth.recovery) return; // erst neues Passwort setzen
+  if (session && session.user) {
+    if (location.hash.includes('access_token')) history.replaceState(null, '', location.pathname + location.search);
+    if (state.userId !== session.user.id) startApp(session.user);
+  } else if (event === 'INITIAL_SESSION') {
+    renderGate(state.auth.pendingError || '');
+    state.auth.pendingError = '';
+  }
+}
+
+/** Sitzung abgelaufen und nicht erneuerbar → zum Login, lokale Daten bleiben. */
+async function handleExpiredSession() {
+  if (!state.auth.client || state.auth.checkingSession) return;
+  state.auth.checkingSession = true;
+  try {
+    const { data } = await state.auth.client.auth.getSession();
+    if (!data || !data.session) {
+      toast('Bitte melde dich neu an');
+      if (state.userId) stopApp({ keepCache: true });
+      setGate('login', 'Deine Sitzung ist abgelaufen. Bitte melde dich neu an.');
+    }
+  } catch { /* offline: einfach weiter */ } finally {
+    state.auth.checkingSession = false;
+  }
+}
+
+/** Profil (Name, Admin?) laden und lokal merken. */
+async function loadProfile() {
+  if (!state.auth.client) return;
+  try {
+    const { data, error } = await state.auth.client.rpc('get_my_profile');
+    if (error) throw error;
+    if (data) {
+      state.meta.profile = { email: data.email || '', display_name: data.display_name || '', is_admin: !!data.is_admin };
+      saveCache();
+      if (!state.admin.viewAs && (state.view === 'settings' || state.view === 'training')) render();
+    }
+  } catch (err) {
+    console.warn('Profil nicht geladen', err);
+  }
+}
+
+function isAdmin() { return !!(state.meta.profile && state.meta.profile.is_admin); }
+function myName() {
+  const p = state.meta.profile;
+  return (p && (p.display_name || p.email)) || '';
+}
+
+/* --- Admin: Konten ansehen (nur lesen) --- */
+async function loadAdminUsers() {
+  const { data, error } = await state.auth.client.rpc('admin_list_users');
+  if (error) throw error;
+  state.admin.users = data || [];
+}
+
+async function loadInviteCode() {
+  const { data, error } = await state.auth.client.rpc('admin_get_invite_code');
+  if (error) throw error;
+  state.admin.inviteCode = data || null;
+}
+
+async function enterViewAs(user) {
+  try {
+    const { data: row, error } = await state.auth.client.rpc('admin_get_user_data', { p_user: user.id });
+    if (error) throw error;
+    const other = row && row.data ? normalizeData(row.data) : emptyData();
+    if (state.meta.dirty) await pushToServer(); // eigene Änderungen vorher sichern
+    state.admin.ownData = state.data;
+    state.admin.viewAs = { id: user.id, name: user.display_name || user.email };
+    state.data = other;
+    state.statsExerciseId = null;
+    document.body.classList.add('read-only');
+    setView('history');
+  } catch (err) {
+    console.warn(err);
+    toast('Konto konnte nicht geladen werden');
+  }
+}
+
+function exitViewAs() {
+  if (!state.admin.viewAs) return;
+  state.data = state.admin.ownData || emptyData();
+  state.admin.ownData = null;
+  state.admin.viewAs = null;
+  state.statsExerciseId = null;
+  document.body.classList.remove('read-only');
+  setView('admin');
+  syncNow();
+}
+
+/* --- Übernahme aus Version 1 (geheimer Link ?k=...) --- */
 /** Schlüssel aus eingefügtem Text holen (ganzer Link oder nur Schlüssel). */
 function extractSecret(text) {
   const t = String(text || '').trim();
@@ -587,38 +920,50 @@ function extractSecret(text) {
   return m ? m[1] : null;
 }
 
-function openWithSecret(secret, isNew = false) {
-  const url = new URL(location.href);
-  url.searchParams.set('k', secret);
-  history.replaceState(null, '', url.toString());
-  startApp(secret, isNew);
+function v1SecretOnDevice() {
+  const s = state.prefs.lastSecret;
+  return s && SECRET_PATTERN.test(s) ? s : null;
 }
 
-function renderGate(errorText = '') {
-  const gate = $('#gate');
-  const saved = state.prefs.lastSecret && SECRET_PATTERN.test(state.prefs.lastSecret);
-  gate.innerHTML = `
-    <div class="gate-brand">
-      <span class="logo"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9v6M7 7v10M17 7v10M20 9v6M7 12h10"/></svg></span>
-      <h1 class="title">Gym-Tracker</h1>
-    </div>
-    <p>Dieser Tracker hat kein Login. Deine Daten gehören zu einem geheimen Schlüssel, der im Link steckt
-      (<span class="num-tab">…/?k=…</span>). Wer den Link hat, sieht die Daten – also gut aufbewahren und nicht teilen.</p>
-    ${errorText ? `<p class="error">${esc(errorText)}</p>` : ''}
-    <div class="gate-actions">
-      ${saved ? '<button class="btn btn-p block" data-action="gate-saved">Mit gespeichertem Link weiter</button>' : ''}
-      <button class="btn ${saved ? 'btn-s' : 'btn-p'} block" data-action="gate-new">Neuen Tracker erstellen</button>
-    </div>
-    <div class="divider">oder</div>
-    <form class="gate-actions card" data-form="gate-open">
-      <label class="field">Bestehenden Link oder Schlüssel einfügen
-        <input class="input" name="link" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="https://…/?k=…">
-      </label>
-      <button class="btn btn-s block" type="submit">Öffnen</button>
-    </form>
-    <p class="small muted">Tipp: Den Link nach dem Erstellen als Lesezeichen speichern und auf Handy und PC öffnen.</p>`;
-  $('#app').hidden = true;
-  gate.hidden = false;
+async function claimV1(secret) {
+  if (!secret) { toast('Kein gültiger V1-Link'); return; }
+  if (!isEmptyData(state.data) && !confirm('Deine aktuellen Daten in diesem Konto werden durch die V1-Daten ersetzt. Weiter?')) return;
+  try {
+    const { data: row, error } = await state.auth.client.rpc('claim_v1_data', { p_secret: secret });
+    if (error) throw error;
+    state.data = normalizeData(row.data);
+    state.meta.dirty = false;
+    state.meta.lastSyncedAt = new Date().toISOString();
+    state.meta.activeWorkoutId = null;
+    state.sync.serverHadData = !isEmptyData(state.data);
+    // V1-Spuren auf diesem Gerät entfernen
+    try { localStorage.removeItem(STORAGE_PREFIX + 'data:' + secret); } catch { /* egal */ }
+    if (state.prefs.lastSecret === secret) { state.prefs.lastSecret = null; savePrefs(); }
+    saveCache();
+    render();
+    toast(`${state.data.workouts.length} Trainings übernommen`);
+  } catch (err) {
+    console.warn(err);
+    if (/v1 not found/i.test(String(err && err.message))) {
+      alert('Zu diesem Link wurden keine V1-Daten gefunden. Vielleicht wurden sie schon übernommen?');
+      if (state.prefs.lastSecret === secret) { state.prefs.lastSecret = null; savePrefs(); render(); }
+    } else {
+      alert('Übernahme fehlgeschlagen. Bist du online? Falls es weiter nicht klappt: In V1 ein JSON-Backup exportieren und hier unter «Backup → Importieren» einlesen.');
+    }
+  }
+}
+
+function v1NoticeHtml() {
+  if (state.admin.viewAs || !v1SecretOnDevice() || !state.sync.configured) return '';
+  return `
+    <div class="notice">
+      <strong>Daten aus Version 1 gefunden</strong>
+      <span>Auf diesem Gerät war der alte Tracker mit Geheim-Link offen. Willst du diese Trainings in dein Konto übernehmen?</span>
+      <div class="row">
+        <button class="btn btn-p btn-sm" data-action="v1-claim-device">Übernehmen</button>
+        <button class="btn btn-s btn-sm" data-action="v1-dismiss">Nein, danke</button>
+      </div>
+    </div>`;
 }
 
 /* ---------------------------------------------------------------------
@@ -630,14 +975,18 @@ function render() {
   destroyCharts();
   document.body.dataset.view = state.view;
   document.querySelectorAll('.nav button').forEach((t) => {
-    if (t.dataset.view === state.view) t.setAttribute('aria-current', 'page');
+    if (t.dataset.view === state.view || (state.view === 'admin' && t.dataset.view === 'settings')) t.setAttribute('aria-current', 'page');
     else t.removeAttribute('aria-current');
   });
   const view = $('#view');
-  if (state.view === 'history') view.innerHTML = renderHistory();
-  else if (state.view === 'stats') view.innerHTML = renderStats();
-  else if (state.view === 'settings') view.innerHTML = renderSettings();
-  else view.innerHTML = renderTraining();
+  if (state.admin.viewAs && !['history', 'stats'].includes(state.view)) state.view = 'history';
+  let html;
+  if (state.view === 'history') html = renderHistory();
+  else if (state.view === 'stats') html = renderStats();
+  else if (state.view === 'settings') html = renderSettings();
+  else if (state.view === 'admin') html = renderAdmin();
+  else html = renderTraining();
+  view.innerHTML = viewAsBannerHtml() + html;
 
   if (state.view === 'stats') drawStats();
   if (!activeWorkout()) hideRest();
@@ -722,9 +1071,8 @@ function renderTraining() {
     : 'Noch kein Training';
 
   return `
-    <div class="head"><div><h1 class="title">Training</h1><p class="sub">${esc(formatDate(todayISO()))}</p></div></div>
-    ${linkHintHtml()}
-    ${syncNoticeHtml()}
+    <div class="head"><div><h1 class="title">Training</h1><p class="sub">${myName() ? `Hallo ${esc(firstWord(myName()))} · ` : ''}${esc(formatDate(todayISO()))}</p></div></div>
+    ${v1NoticeHtml()}
     <div class="start">
       <button class="btn ${last ? 'btn-p' : 'btn-s'}" data-action="start-repeat" ${last ? '' : 'disabled'}>
         <span>Letztes Training wiederholen</span><small>${esc(lastInfo)}</small></button>
@@ -770,25 +1118,19 @@ function renderSummary() {
     <button class="btn btn-p block" data-action="summary-close">Zur Übersicht</button>`;
 }
 
-function linkHintHtml() {
-  if (!state.meta.showLinkHint) return '';
-  return `
-    <div class="notice">
-      <strong>Neuer Tracker erstellt.</strong>
-      <span>Speichere diesen Link als Lesezeichen. Ohne ihn kommst du auf einem anderen Gerät nicht an deine Daten.</span>
-      <div class="row">
-        <button class="btn btn-p btn-sm" data-action="copy-link">Link kopieren</button>
-        <button class="btn btn-s btn-sm" data-action="dismiss-link-hint">Erledigt</button>
-      </div>
-    </div>`;
+/** Erstes Wort eines Namens (für die Begrüssung), E-Mail → Teil vor dem @. */
+function firstWord(name) {
+  return String(name).split('@')[0].trim().split(/\s+/)[0].slice(0, 30);
 }
 
-function syncNoticeHtml() {
-  if (state.sync.configured) return '';
+/** Leiste oben, solange der Admin ein fremdes Konto ansieht. */
+function viewAsBannerHtml() {
+  const v = state.admin.viewAs;
+  if (!v) return '';
   return `
-    <div class="notice">
-      <strong>Sync nicht eingerichtet</strong>
-      <span>Deine Daten werden nur in diesem Browser gespeichert. Für Handy + PC: Supabase einrichten (siehe SETUP.md).</span>
+    <div class="viewas" role="status">
+      <div><span class="eyebrow">Nur ansehen</span><b>${esc(v.name)}</b></div>
+      <button class="btn btn-s btn-sm" data-action="admin-exit">Zurück zu mir</button>
     </div>`;
 }
 
@@ -812,7 +1154,7 @@ function logRow(w, prCount) {
         return `<div><span>${esc(ex.name)}${en.variant ? ` <small class="muted">(${esc(en.variant)})</small>` : ''}</span><span>${list}</span></div>`;
       }).join('')}
       ${w.note ? `<p class="log-note">${esc(w.note)}</p>` : ''}
-      <button class="btn btn-s" data-action="open-workout" data-id="${esc(w.id)}">Bearbeiten</button>
+      ${state.admin.viewAs ? '' : `<button class="btn btn-s" data-action="open-workout" data-id="${esc(w.id)}">Bearbeiten</button>`}
     </div>
   </details>`;
 }
@@ -828,7 +1170,6 @@ function renderWorkoutEditor(w) {
 
   return `
     <div class="head"><div><h1 class="title">${w.date === todayISO() ? 'Heutiges Training' : 'Training'}</h1><p class="sub">${esc(formatDate(w.date))}</p></div></div>
-    ${linkHintHtml()}
     <div class="session" data-workout="${esc(w.id)}">
       <div><div class="v" id="dur">–</div><div class="l">Dauer</div></div>
       <div><div class="v" id="vol">${thousand(c.vol)}<small>kg</small></div><div class="l">Volumen</div></div>
@@ -952,7 +1293,7 @@ function renderHistory() {
   const workouts = sortedWorkouts();
   const head = `<div class="head"><div><h1 class="title">Verlauf</h1><p class="sub">${workouts.length} ${workouts.length === 1 ? 'Training' : 'Trainings'}</p></div></div>`;
   if (!workouts.length) {
-    return head + '<div class="card"><p class="empty">Noch keine Trainings. Starte eines unter «Training».</p></div>';
+    return head + `<div class="card"><p class="empty">${state.admin.viewAs ? 'Dieses Konto hat noch keine Trainings.' : 'Noch keine Trainings. Starte eines unter «Training».'}</p></div>`;
   }
   const prs = historicPRCounts();
   const groups = [];
@@ -1067,17 +1408,17 @@ function renderStats() {
       </div>` : ''}
       <div class="card span2">
         <div class="hero"><div><div class="eyebrow">Körpergewicht</div><div class="big">${bwAll.length ? esc(fmtNum(bwAll[0].kg, 1)) : '–'}<small>kg</small></div></div></div>
-        <form class="bw-form" data-form="bodyweight">
+        ${state.admin.viewAs ? '' : `<form class="bw-form" data-form="bodyweight">
           <input class="input tnum" type="date" name="date" value="${todayISO()}" max="${todayISO()}" aria-label="Datum">
           <input class="input tnum" name="kg" inputmode="decimal" placeholder="kg heute" aria-label="Körpergewicht in kg" required>
           <button class="btn btn-s" type="submit">Speichern</button>
-        </form>
+        </form>`}
         ${bwInRange.length
           ? '<div class="chart chart-bw"><canvas id="bwChart" role="img" aria-label="Körpergewicht"></canvas></div>'
           : `<p class="muted">${bwAll.length ? `Keine Einträge im Zeitraum «${esc(r.label)}».` : 'Noch keine Einträge.'}</p>`}
         ${bwAll.length ? `<div class="bw-list">${bwAll.slice(0, 5).map((b) => `
           <div class="side-row"><span>${esc(formatDate(b.date, 'weekday'))}</span><b>${esc(fmtNum(b.kg, 1))} kg</b>
-            <button class="x" data-action="bw-delete" data-id="${esc(b.id)}" aria-label="Eintrag löschen">${ICON_X}</button></div>`).join('')}</div>` : ''}
+            ${state.admin.viewAs ? '' : `<button class="x" data-action="bw-delete" data-id="${esc(b.id)}" aria-label="Eintrag löschen">${ICON_X}</button>`}</div>`).join('')}</div>` : ''}
       </div>
     </div>`;
 }
@@ -1087,23 +1428,67 @@ function renderSettings() {
   const exercises = [...state.data.exercises].sort((a, b) => a.name.localeCompare(b.name, 'de'));
   const lastSync = state.meta.lastSyncedAt ? new Date(state.meta.lastSyncedAt).toLocaleString('de-CH') : '–';
   const palette = state.prefs.palette || 'stahl';
+  const profile = state.meta.profile || {};
+  if (isAdmin() && !state.admin.inviteCode && state.sync.configured && !state.admin.loadingInvite) {
+    state.admin.loadingInvite = true;
+    loadInviteCode().then(() => { if (state.view === 'settings') render(); })
+      .catch((err) => console.warn(err)).finally(() => { state.admin.loadingInvite = false; });
+  }
 
   return `
     <div class="head"><div><h1 class="title">Mehr</h1></div></div>
 
     <div class="card">
-      <h2>Dein Link</h2>
-      <p class="small muted">Mit diesem Link öffnest du deine Daten auf Handy und PC. Nicht teilen – wer ihn hat, sieht und ändert deine Daten.</p>
-      <div class="link-box" id="linkBox">${esc(personalLink())}</div>
-      <button class="btn btn-s" data-action="copy-link">Link kopieren</button>
+      <h2>Konto</h2>
+      <form class="acc-form" data-form="account-name">
+        <label class="field">Name
+          <input class="input" name="name" value="${esc(profile.display_name || '')}" maxlength="60" autocomplete="nickname" placeholder="Vorname oder Spitzname">
+        </label>
+        <button class="btn btn-s" type="submit">Speichern</button>
+      </form>
+      <p class="small muted">Angemeldet als <b>${esc(profile.email || '–')}</b>${isAdmin() ? ' · Admin' : ''}</p>
+      <details class="acc-pw">
+        <summary>Passwort ändern</summary>
+        <form class="gate-actions" data-form="account-password" novalidate>
+          <label class="field">Neues Passwort (mind. ${MIN_PASSWORD} Zeichen)
+            <input class="input" name="password" type="password" autocomplete="new-password" minlength="${MIN_PASSWORD}" required>
+          </label>
+          <label class="field">Passwort wiederholen
+            <input class="input" name="password2" type="password" autocomplete="new-password" minlength="${MIN_PASSWORD}" required>
+          </label>
+          <button class="btn btn-s" type="submit">Passwort speichern</button>
+        </form>
+      </details>
+      <button class="btn btn-d" data-action="logout">Abmelden</button>
     </div>
+
+    ${isAdmin() ? `<div class="card">
+      <div class="card-head"><h2>Admin</h2><span class="badge-soft">nur lesen</span></div>
+      <p class="small muted">Schick diesen Link an Leute, die den Tracker nutzen sollen. Wer ihn hat, kann ein Konto erstellen. Mit «Neuer Code» wird der alte Link ungültig (bestehende Konten bleiben).</p>
+      <div class="link-box" id="inviteBox">${state.admin.inviteCode ? esc(inviteLink(state.admin.inviteCode)) : 'Wird geladen …'}</div>
+      <div class="row-2">
+        <button class="btn btn-p" data-action="copy-invite" ${state.admin.inviteCode ? '' : 'disabled'}>Link kopieren</button>
+        <button class="btn btn-s" data-action="new-invite">Neuer Code</button>
+      </div>
+      <button class="btn btn-s" data-action="nav" data-view="admin">Alle Konten ansehen</button>
+    </div>` : ''}
+
+    ${v1SecretOnDevice() || isAdmin() ? `<div class="card">
+      <h2>Daten aus Version 1</h2>
+      <p class="small muted">Übernimmt die Trainings vom alten Tracker mit Geheim-Link (…/?k=…) in dieses Konto. Der alte Eintrag wird dabei gelöscht.</p>
+      ${v1SecretOnDevice() ? '<button class="btn btn-p" data-action="v1-claim-device">Alten Tracker von diesem Gerät übernehmen</button>' : ''}
+      <form class="inline-form" data-form="v1-claim">
+        <input class="input" name="link" placeholder="Alten Link einfügen: https://…/?k=…" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Alter V1-Link">
+        <button class="btn btn-s" type="submit">Übernehmen</button>
+      </form>
+    </div>` : ''}
 
     <div class="card">
       <div class="card-head"><h2>Sync</h2><span class="small muted" id="syncStatusText">${SYNC_LABELS[state.sync.status]}</span></div>
       ${state.sync.configured
         ? `<p class="small muted">Zuletzt synchronisiert: ${esc(lastSync)}</p>
            <button class="btn btn-s" data-action="sync-now">Jetzt synchronisieren</button>`
-        : '<p class="small muted">In config.js sind noch keine Supabase-Daten eingetragen. Die App speichert deshalb nur in diesem Browser. Anleitung: SETUP.md.</p>'}
+        : '<p class="small muted">Offline-Modus: Änderungen werden in diesem Browser gespeichert und hochgeladen, sobald du die Seite mit Internet neu lädst.</p>'}
     </div>
 
     <div class="card">
@@ -1153,6 +1538,37 @@ function renderSettings() {
         </div>
         <div class="tile-info"><b>${esc(n)}</b><span>${esc(d)}</span></div>
       </button>`).join('')}</div>`;
+}
+
+/* --- Admin: alle Konten (nur lesen) --- */
+function renderAdmin() {
+  if (!isAdmin()) { state.view = 'settings'; return renderSettings(); }
+  const users = state.admin.users;
+  if (!users && state.sync.configured && !state.admin.loadingUsers) {
+    state.admin.loadingUsers = true;
+    loadAdminUsers().catch((err) => { console.warn(err); state.admin.usersError = true; })
+      .finally(() => { state.admin.loadingUsers = false; if (state.view === 'admin') render(); });
+  }
+  const head = `<div class="head"><div><h1 class="title">Konten</h1><p class="sub">${users ? `${users.length} ${users.length === 1 ? 'Konto' : 'Konten'} · nur lesen` : 'Alle Konten · nur lesen'}</p></div>
+    <button class="btn btn-s btn-sm" data-action="nav" data-view="settings">Zurück</button></div>`;
+  if (!state.sync.configured) return head + '<div class="card"><p class="empty">Offline – Konten können nicht geladen werden.</p></div>';
+  if (!users) {
+    return head + `<div class="card"><p class="empty">${state.admin.usersError ? 'Konten konnten nicht geladen werden.' : 'Wird geladen …'}</p>
+      ${state.admin.usersError ? '<button class="btn btn-s" data-action="admin-reload">Nochmals versuchen</button>' : ''}</div>`;
+  }
+  return head + `
+    <div class="card log users">${users.map((u) => {
+      const me = u.id === state.userId;
+      const last = u.last_workout && isValidISODate(u.last_workout) ? relativeDay(u.last_workout) : 'noch nie';
+      return `<button class="user-row" data-action="admin-view" data-id="${esc(u.id)}" ${me ? 'disabled' : ''}>
+        <span class="user-av" aria-hidden="true">${esc((u.display_name || u.email || '?').trim().charAt(0).toUpperCase())}</span>
+        <span class="user-main"><b>${esc(u.display_name || u.email)}${me ? ' <small class="muted">(du)</small>' : ''}</b>
+          <small>${esc(u.email)} · seit ${esc(formatDate(toISODate(new Date(u.created_at)), 'short'))}</small></span>
+        <span class="user-stat"><b class="tnum">${u.workouts}</b><small>Letztes: ${esc(last)}</small></span>
+      </button>`;
+    }).join('')}</div>
+    <button class="btn btn-s" data-action="admin-reload">Aktualisieren</button>
+    <p class="small muted">Tippe auf ein Konto, um Verlauf und Fortschritt anzusehen. Ändern ist dort nicht möglich.</p>`;
 }
 
 /* ---------------------------------------------------------------------
@@ -1653,9 +2069,32 @@ const actions = {
     render();
   },
 
-  'copy-link': () => copyText(personalLink()),
-  'dismiss-link-hint': () => { state.meta.showLinkHint = false; saveCache(); render(); },
   'sync-now': () => { pullFromServer(); },
+
+  /* Konto & Admin */
+  logout: () => logout(),
+  'copy-invite': () => { if (state.admin.inviteCode) copyText(inviteLink(state.admin.inviteCode), 'Einladungslink kopiert'); },
+  'new-invite': async () => {
+    if (!confirm('Neuen Einladungscode erzeugen? Der bisherige Einladungslink funktioniert danach nicht mehr.')) return;
+    try {
+      const { data, error } = await state.auth.client.rpc('admin_set_invite_code', { p_code: null });
+      if (error) throw error;
+      state.admin.inviteCode = data;
+      render();
+      toast('Neuer Einladungslink erstellt');
+    } catch (err) {
+      console.warn(err);
+      toast('Hat nicht geklappt (offline?)');
+    }
+  },
+  'admin-view': (el) => {
+    const user = (state.admin.users || []).find((u) => u.id === el.dataset.id);
+    if (user) enterViewAs(user);
+  },
+  'admin-exit': () => exitViewAs(),
+  'admin-reload': () => { state.admin.users = null; state.admin.usersError = false; render(); },
+  'v1-claim-device': () => claimV1(v1SecretOnDevice()),
+  'v1-dismiss': () => { state.prefs.lastSecret = null; savePrefs(); render(); },
 
   export: () => exportData(),
   import: () => $('#importFile').click(),
@@ -1667,11 +2106,21 @@ const actions = {
     render();
   },
 
-  'gate-new': () => {
-    const secret = randomSecret();
-    openWithSecret(secret, true);
+  /* Startbildschirm */
+  'gate-mode': (el) => {
+    const form = $('#gate form');
+    if (form && form.email && form.email.value) state.auth.gateEmail = form.email.value.trim();
+    setGate(el.dataset.mode);
   },
-  'gate-saved': () => openWithSecret(state.prefs.lastSecret),
+  'resend-confirm': () => gateTask(async () => {
+    const { error } = await state.auth.client.auth.resend({
+      type: 'signup', email: state.auth.gateEmail, options: { emailRedirectTo: appUrl() },
+    });
+    if (error) throw error;
+    return { info: 'E-Mail wurde nochmals gesendet.' };
+  }),
+  reload: () => location.reload(),
+  'gate-offline': () => startOffline(),
 };
 
 function stepWeight(el, delta) {
@@ -1729,10 +2178,10 @@ function setFocusRow(row) {
   state.focus = { entry: row.dataset.entry, set: Number(row.dataset.set) };
 }
 
-async function copyText(text) {
+async function copyText(text, message = 'Link kopiert') {
   try {
     await navigator.clipboard.writeText(text);
-    toast('Link kopiert');
+    toast(message);
   } catch {
     prompt('Link kopieren:', text);
   }
@@ -1801,10 +2250,107 @@ const forms = {
     toast('Körpergewicht gespeichert');
   },
 
-  'gate-open': (form) => {
+  /* Startbildschirm */
+  login: (form) => {
+    const email = form.email.value.trim();
+    const password = form.password.value;
+    state.auth.gateEmail = email;
+    if (!email || !password) { renderGate('Bitte E-Mail und Passwort eingeben.'); return; }
+    gateTask(async () => {
+      const { error } = await state.auth.client.auth.signInWithPassword({ email, password });
+      if (error) throw error;
+      // Weiter geht es über onAuthStateChange (SIGNED_IN)
+    });
+  },
+
+  register: (form) => {
+    const name = form.name.value.trim().slice(0, 60);
+    const email = form.email.value.trim();
+    const password = form.password.value;
+    const invite = getInvite();
+    state.auth.gateEmail = email;
+    state.auth.gateName = name;
+    if (!name) { renderGate('Bitte gib einen Namen ein.'); return; }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { renderGate('Bitte gib eine gültige E-Mail-Adresse ein.'); return; }
+    if (password.length < MIN_PASSWORD) { renderGate(`Das Passwort braucht mindestens ${MIN_PASSWORD} Zeichen.`); return; }
+    gateTask(async () => {
+      const { data: ok, error: checkError } = await state.auth.client.rpc('check_invite', { p_code: invite });
+      if (checkError) throw checkError;
+      if (!ok) throw userError('Dieser Einladungslink ist nicht mehr gültig. Frag nach einem neuen Link.');
+      const { data, error } = await state.auth.client.auth.signUp({
+        email, password,
+        options: { data: { invite_code: invite, name }, emailRedirectTo: appUrl() },
+      });
+      if (error) throw error;
+      setInvite('');
+      if (!data.session) state.auth.gateMode = 'registered'; // Bestätigungsmail nötig
+      // Mit Session (Bestätigung ausgeschaltet) startet die App über onAuthStateChange
+    });
+  },
+
+  forgot: (form) => {
+    const email = form.email.value.trim();
+    state.auth.gateEmail = email;
+    if (!email) { renderGate('Bitte gib deine E-Mail ein.'); return; }
+    gateTask(async () => {
+      const { error } = await state.auth.client.auth.resetPasswordForEmail(email, { redirectTo: appUrl() });
+      if (error) throw error;
+      state.auth.gateMode = 'forgot-sent';
+    });
+  },
+
+  reset: (form) => {
+    const password = form.password.value;
+    if (password.length < MIN_PASSWORD) { renderGate(`Das Passwort braucht mindestens ${MIN_PASSWORD} Zeichen.`); return; }
+    if (password !== form.password2.value) { renderGate('Die beiden Passwörter sind nicht gleich.'); return; }
+    gateTask(async () => {
+      const { data, error } = await state.auth.client.auth.updateUser({ password });
+      if (error) throw error;
+      state.auth.recovery = false;
+      toast('Neues Passwort gespeichert');
+      const { data: s } = await state.auth.client.auth.getSession();
+      const user = (s && s.session && s.session.user) || (data && data.user);
+      if (user && !state.userId) startApp(user);
+      else if (!user) state.auth.gateMode = 'login';
+    });
+  },
+
+  /* Konto */
+  'account-name': async (form) => {
+    const name = form.name.value.trim().slice(0, 60);
+    try {
+      const { error } = await state.auth.client.rpc('update_my_name', { p_name: name });
+      if (error) throw error;
+      state.meta.profile = { ...(state.meta.profile || {}), display_name: name };
+      saveCache();
+      state.admin.users = null;
+      toast('Name gespeichert');
+    } catch (err) {
+      console.warn(err);
+      toast('Hat nicht geklappt (offline?)');
+    }
+  },
+
+  'account-password': async (form) => {
+    const password = form.password.value;
+    if (password.length < MIN_PASSWORD) { toast(`Mindestens ${MIN_PASSWORD} Zeichen`); return; }
+    if (password !== form.password2.value) { toast('Die Passwörter sind nicht gleich'); return; }
+    try {
+      const { error } = await state.auth.client.auth.updateUser({ password });
+      if (error) throw error;
+      form.reset();
+      form.closest('details').open = false;
+      toast('Passwort geändert');
+    } catch (err) {
+      console.warn(err);
+      alert(authErrorText(err));
+    }
+  },
+
+  'v1-claim': (form) => {
     const secret = extractSecret(form.link.value);
-    if (!secret) { renderGate('Das sieht nicht nach einem gültigen Link oder Schlüssel aus.'); return; }
-    openWithSecret(secret);
+    if (!secret) { toast('Das sieht nicht nach einem V1-Link aus'); return; }
+    claimV1(secret);
   },
 };
 
@@ -1860,6 +2406,8 @@ function bindEvents() {
       return;
     }
     if (el.disabled) return;
+    if (state.admin.viewAs && !READONLY_ACTIONS.has(el.dataset.action)) return;
+    if (state.admin.viewAs && el.dataset.action === 'nav' && !['history', 'stats'].includes(el.dataset.view)) return;
     const fn = actions[el.dataset.action];
     if (fn) { e.preventDefault(); fn(el); }
   });
@@ -1874,14 +2422,17 @@ function bindEvents() {
     const form = e.target.closest('[data-form]');
     if (!form) return;
     e.preventDefault();
+    if (state.admin.viewAs) return;
     const fn = forms[form.dataset.form];
     if (fn) fn(form);
   });
 
   document.addEventListener('input', (e) => {
+    if (state.admin.viewAs) return;
     if (e.target.dataset && e.target.dataset.field) onFieldInput(e.target);
   });
   document.addEventListener('change', (e) => {
+    if (state.admin.viewAs) return;
     if (e.target.dataset && e.target.dataset.field) onFieldChange(e.target);
   });
 
@@ -1927,32 +2478,108 @@ function applyTheme() {
   if (meta) meta.content = cssVar('--bg') || '#0e1217';
 }
 
-function startApp(secret, isNew = false) {
-  state.secret = secret;
-  state.prefs.lastSecret = secret;
+/** App für ein angemeldetes Konto starten (user = Supabase-User). */
+function startApp(user, { offline = false } = {}) {
+  if (state.userId && state.userId !== user.id) stopApp({ keepCache: true });
+  state.userId = user.id;
+  state.prefs.lastUserId = user.id;
   savePrefs();
 
   const cached = loadCache();
   state.data = cached ? cached.data : emptyData();
-  Object.assign(state.meta, cached ? cached.meta : {});
-  if (isNew) state.meta.showLinkHint = true;
+  state.meta = {
+    dirty: false, lastSyncedAt: null, activeWorkoutId: null, profile: null,
+    ...(cached ? cached.meta : {}),
+  };
+  if (user.email && !state.meta.profile) state.meta.profile = { email: user.email, display_name: '', is_admin: false };
   if (state.meta.activeWorkoutId && !getWorkout(state.meta.activeWorkoutId)) state.meta.activeWorkoutId = null;
+  state.admin = { users: null, inviteCode: null, viewAs: null, ownData: null };
+  state.view = 'training';
+  state.summary = null;
+  state.focus = null;
+  document.body.classList.remove('read-only');
 
   $('#gate').hidden = true;
   $('#app').hidden = false;
-  initSync();
+  if (offline) {
+    state.sync.configured = false;
+    setSyncStatus('offline');
+  } else {
+    initSync();
+  }
   render();
-  pullFromServer();
+  if (!offline) {
+    pullFromServer();
+    loadProfile();
+  }
+}
+
+/** Offline mit dem zuletzt angemeldeten Konto weiterarbeiten (Supabase nicht geladen). */
+function startOffline() {
+  const id = state.prefs.lastUserId;
+  if (!id) return;
+  startApp({ id, email: '' }, { offline: true });
+}
+
+/** App beenden (Logout). Lokale Kopie wird entfernt, ausser keepCache. */
+function stopApp({ keepCache = false } = {}) {
+  clearTimeout(state.sync.pushTimer);
+  if (!keepCache && state.userId) {
+    try { localStorage.removeItem(cacheKey(state.userId)); } catch { /* egal */ }
+  }
+  if (!keepCache) { state.prefs.lastUserId = null; savePrefs(); }
+  destroyCharts();
+  hideRest();
+  state.userId = null;
+  state.data = null;
+  state.meta = { dirty: false, lastSyncedAt: null, activeWorkoutId: null, profile: null };
+  state.admin = { users: null, inviteCode: null, viewAs: null, ownData: null };
+  state.sync.serverChecked = false;
+  state.sync.serverHadData = false;
+  document.body.classList.remove('read-only');
+  $('#view').innerHTML = '';
+}
+
+async function logout() {
+  if (state.admin.viewAs) exitViewAs();
+  if (state.meta.dirty) {
+    await pushToServer();
+    if (state.meta.dirty && !confirm('Einige Änderungen sind noch nicht auf dem Server (offline?). Trotzdem abmelden? Sie gehen dann verloren.')) return;
+  }
+  state.auth.gateEmail = (state.meta.profile && state.meta.profile.email) || '';
+  stopApp();
+  setGate('login');
+  try { await state.auth.client.auth.signOut(); } catch (err) { console.warn(err); }
 }
 
 function init() {
   loadPrefs();
   applyTheme();
   bindEvents();
+  readInviteFromUrl();
+  const hashError = readHashError();
+  if (/type=recovery/.test(location.hash)) state.auth.recovery = true;
 
-  const secret = getSecretFromUrl();
-  if (secret) startApp(secret);
-  else renderGate(secret === false ? 'Der Schlüssel im Link ist ungültig.' : '');
+  const { cfg, configOk, libOk } = configCheck();
+  if (!configOk) {
+    $('#gate').innerHTML = gateBrand() + '<p class="error">In config.js fehlen die Supabase-Daten. Siehe SETUP.md.</p>';
+    $('#gate').hidden = false;
+    return;
+  }
+  if (!libOk) {
+    console.warn('Supabase-Bibliothek nicht geladen (offline?)');
+    setGate('offline');
+    return;
+  }
+
+  state.auth.client = window.supabase.createClient(cfg.supabaseUrl, cfg.supabaseAnonKey, {
+    auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true, storageKey: STORAGE_PREFIX + 'auth' },
+  });
+  state.auth.pendingError = hashError;
+  // Supabase empfiehlt: im Callback keine weiteren Supabase-Aufrufe direkt abwarten → entkoppeln
+  state.auth.client.auth.onAuthStateChange((event, session) => {
+    setTimeout(() => handleAuthEvent(event, session), 0);
+  });
 }
 
 init();

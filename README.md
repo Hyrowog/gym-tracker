@@ -3,12 +3,14 @@
 Schlanker Trainings-Tracker fürs Handy: Sätze direkt nach dem Satz eintragen, Fortschritt über Monate sehen. Gleiche Daten auf Handy und PC.
 
 - Plain HTML/CSS/JavaScript, kein Framework, kein Build-Schritt
+- **Version 2:** Login mit eigenem Konto (Supabase Auth, E-Mail + Passwort)
+- Registrieren nur über Einladungslink (`?invite=CODE`), von der Datenbank geprüft
+- Jedes Konto sieht nur seine Daten; Admins können alle Konten lesend ansehen
 - Daten: localStorage (schnell, offline) + Supabase (Sync zwischen Geräten)
-- Zugang über privaten Link mit geheimem Schlüssel (`?k=…`), kein Login
 - Diagramme mit Chart.js 4.4.1
 
 **Einrichtung:** siehe [SETUP.md](SETUP.md).
 
 ## Code-Aufbau
 
-`app.js` ist in nummerierte Abschnitte gegliedert (Konstanten, Hilfsfunktionen, Datenmodell, Sync, Link/Startbildschirm, Ansichten, Diagramme, Aktionen, Start). Neue Funktionen wie Pausen-Timer oder PWA passen als eigene Abschnitte bzw. Dateien (`manifest.json`, `sw.js`) dazu, ohne den Rest umzubauen.
+`app.js` ist in nummerierte Abschnitte gegliedert (Konstanten, Hilfsfunktionen, Datenmodell, Sync, Login/Startbildschirm, Ansichten inkl. Admin, Diagramme, Aktionen, Start). Die Datenbank-Logik steht in `schema-v2.sql`: Die App greift nur über Funktionen zu, die mit `auth.uid()` arbeiten.
