@@ -1178,6 +1178,7 @@ function render() {
   if (!activeWorkout()) hideRest();
   runCountUps();
   animateColorPickers();
+  setupScrollers();
   state.animateCharts = false;
   tick();
 }
@@ -1623,6 +1624,26 @@ function renderSummary() {
     <button class="btn btn-p block" data-action="summary-close">Zur Übersicht</button>`;
 }
 
+/**
+ * Wischbare Chip-Zeilen (.scroller): gewählten Chip in die Mitte holen,
+ * Verlauf am Rand und Pfeile nur zeigen, wenn es in diese Richtung weitergeht.
+ */
+function setupScrollers() {
+  document.querySelectorAll('.scroller').forEach((box) => {
+    const row = box.querySelector('.chips-scroll');
+    if (!row) return;
+    const update = () => {
+      const max = row.scrollWidth - row.clientWidth;
+      box.classList.toggle('at-start', row.scrollLeft <= 2);
+      box.classList.toggle('at-end', row.scrollLeft >= max - 2);
+    };
+    const sel = row.querySelector('[aria-pressed="true"]');
+    if (sel) row.scrollTo({ left: Math.max(0, sel.offsetLeft - (row.clientWidth - sel.offsetWidth) / 2), behavior: 'instant' });
+    update();
+    row.addEventListener('scroll', update, { passive: true });
+  });
+}
+
 /** Abschluss: «Verbessert: 2 von 4 Übungen» (nur wenn es etwas zu vergleichen gab). */
 function improvedHtml(s) {
   if (!s.compared) return '';
@@ -2030,8 +2051,12 @@ function renderStats() {
     <div class="st-grid">
       <div class="card span2">
         ${exercises.length ? `
-          <div class="chips-scroll" role="group" aria-label="Übung wählen">${exercises.map((e) =>
-            `<button class="chip" data-action="stats-ex" data-id="${esc(e.id)}" aria-pressed="${e.id === state.statsExerciseId}">${esc(e.name)}</button>`).join('')}</div>
+          <div class="scroller at-start">
+            <button class="sc-btn sc-prev" type="button" data-action="scroll-chips" data-dir="-1" aria-label="Weitere Übungen links" tabindex="-1">${ICON_CHEVRON}</button>
+            <div class="chips-scroll" role="group" aria-label="Übung wählen">${exercises.map((e) =>
+              `<button class="chip" data-action="stats-ex" data-id="${esc(e.id)}" aria-pressed="${e.id === state.statsExerciseId}">${esc(e.name)}</button>`).join('')}</div>
+            <button class="sc-btn sc-next" type="button" data-action="scroll-chips" data-dir="1" aria-label="Weitere Übungen rechts" tabindex="-1">${ICON_CHEVRON}</button>
+          </div>
           ${series.length ? `
             <div class="hero" id="exBest">
               <div><div class="eyebrow">${isDist ? `Distanz letztes Training${lastP.pace ? `, Tempo ${esc(lastP.pace)} /km` : ''}` : isBw ? 'Meiste Wiederholungen im Satz' : 'Kraftwert'}</div><div class="big">${fmtNum(lastP.primary, 1)}<small>${unit}</small></div></div>
@@ -2920,6 +2945,10 @@ const moreActions = {
   'goto-ex': (el) => {
     state.statsExerciseId = el.dataset.id;
     setView('stats');
+  },
+  'scroll-chips': (el) => {
+    const row = el.parentElement.querySelector('.chips-scroll');
+    if (row) row.scrollBy({ left: Number(el.dataset.dir) * row.clientWidth * 0.7, behavior: 'smooth' });
   },
   'feedback-again': () => { state.feedbackSent = false; render(); },
   'hist-filter': (el) => {
