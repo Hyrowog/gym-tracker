@@ -83,7 +83,7 @@ const INVITE_PATTERN = /^[A-Za-z0-9_-]{6,64}$/;
 const MIN_PASSWORD = 8;
 
 /* Aktionen, die beim Ansehen eines fremden Kontos (Admin, nur lesen) erlaubt sind */
-const READONLY_ACTIONS = new Set(['nav', 'stats-ex', 'set-range', 'admin-exit', 'set-theme', 'set-palette']);
+const READONLY_ACTIONS = new Set(['nav', 'stats-ex', 'set-range', 'admin-exit', 'set-theme', 'set-palette', 'hist-filter', 'goto-ex']);
 
 const state = {
   userId: null,               // angemeldetes Konto (Supabase-User-ID)
@@ -256,8 +256,45 @@ const ICON_STAR = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.5l
    3. Datenmodell & lokaler Speicher
    --------------------------------------------------------------------- */
 function emptyData() {
-  return { version: 1, updatedAt: null, exercises: [], workouts: [], bodyweight: [] };
+  return { version: 1, updatedAt: null, exercises: [], workouts: [], bodyweight: [], nameColors: {} };
 }
+
+/* V3.3: Farbe pro Trainingsname (frei wählbar, wird mit den Daten synchronisiert).
+   Schlüssel = Name in Kleinbuchstaben, Wert = einer der Farbschlüssel unten. */
+const NAME_COLORS = ['orange', 'blau', 'violett', 'gruen', 'pink', 'gelb', 'tuerkis', 'grau'];
+const NAME_COLOR_LABELS = { orange: 'Orange', blau: 'Blau', violett: 'Violett', gruen: 'Grün', pink: 'Pink', gelb: 'Gelb', tuerkis: 'Türkis', grau: 'Grau' };
+/** Gewählte Farbe, sonst eine feste Farbe aus dem Namen (immer gleich für denselben Namen). */
+function nameColor(name) {
+  const key = String(name || '').trim().toLowerCase();
+  if (!key) return 'grau';
+  const chosen = state.data && state.data.nameColors && state.data.nameColors[key];
+  if (NAME_COLORS.includes(chosen)) return chosen;
+  return defaultNameColors()[key] || 'grau';
+}
+/** Standardfarben: Namen in der Reihenfolge ihres ersten Trainings, jeder bekommt die nächste noch freie Farbe. */
+let nameColorCache = { stamp: '', map: {} };
+function defaultNameColors() {
+  if (!state.data) return {};
+  const stamp = `${state.data.workouts.length}|${state.data.updatedAt}|${JSON.stringify(state.data.nameColors || {})}`;
+  if (nameColorCache.stamp === stamp) return nameColorCache.map;
+  const firstSeen = new Map();
+  for (const w of state.data.workouts) {
+    const k = String(w.name || '').trim().toLowerCase();
+    if (k && (!firstSeen.has(k) || w.date < firstSeen.get(k))) firstSeen.set(k, w.date);
+  }
+  const chosen = state.data.nameColors || {};
+  const taken = new Set(Object.values(chosen));
+  const free = NAME_COLORS.slice(0, 7).filter((c) => !taken.has(c));
+  const pool = free.length ? free : NAME_COLORS.slice(0, 7);
+  const map = {};
+  let i = 0;
+  [...firstSeen.entries()].sort((a, b) => a[1].localeCompare(b[1]) || a[0].localeCompare(b[0])).forEach(([k]) => {
+    if (!chosen[k]) map[k] = pool[i++ % pool.length];
+  });
+  nameColorCache = { stamp, map };
+  return map;
+}
+function tagClass(name) { return 'tc-' + nameColor(name); }
 
 function isEmptyData(d) {
   return !d || (d.exercises.length === 0 && d.workouts.length === 0 && d.bodyweight.length === 0);
@@ -306,7 +343,14 @@ function normalizeData(raw) {
     .filter((b) => b && isValidISODate(b.date) && Number.isFinite(Number(b.kg)))
     .map((b) => ({ id: String(b.id || uid()), date: b.date, kg: Number(b.kg) }));
 
-  return { version: 1, updatedAt: raw.updatedAt || null, exercises, workouts, bodyweight };
+  const nameColors = {};
+  if (raw.nameColors && typeof raw.nameColors === 'object') {
+    for (const [k, v] of Object.entries(raw.nameColors)) {
+      if (typeof k === 'string' && k.length <= NAME_MAX && NAME_COLORS.includes(v)) nameColors[k.toLowerCase()] = v;
+    }
+  }
+
+  return { version: 1, updatedAt: raw.updatedAt || null, exercises, workouts, bodyweight, nameColors };
 }
 
 function cacheKey(userId = state.userId) { return STORAGE_PREFIX + 'user:' + userId; }
@@ -457,6 +501,7 @@ function startWorkout(mode, sourceId = null) {
   state.focus = null;
   state.summary = null;
   state.naming = false;
+  state.view = 'training';
   commit();
   render();
   playEnter();
@@ -600,6 +645,7 @@ function mergeData(server, local) {
   for (const b of local.bodyweight) {
     if (!out.bodyweight.some((x) => x.id === b.id || x.date === b.date)) out.bodyweight.push({ ...b });
   }
+  out.nameColors = { ...(local.nameColors || {}), ...(out.nameColors || {}) };
   out.updatedAt = new Date().toISOString();
   return out;
 }
@@ -986,7 +1032,7 @@ async function loadProfile() {
     if (data) {
       state.meta.profile = { email: data.email || '', display_name: data.display_name || '', is_admin: !!data.is_admin };
       saveCache();
-      if (!state.admin.viewAs && (state.view === 'settings' || state.view === 'training')) render();
+      if (!state.admin.viewAs && (state.view === 'settings' || state.view === 'training' || state.view === 'home')) render();
     }
   } catch (err) {
     console.warn('Profil nicht geladen', err);
@@ -1107,29 +1153,40 @@ function v1NoticeHtml() {
    --------------------------------------------------------------------- */
 function render() {
   destroyCharts();
-  document.body.dataset.view = state.view;
-  document.querySelectorAll('.nav button').forEach((t) => {
-    if (t.dataset.view === state.view || (state.view === 'admin' && t.dataset.view === 'settings')) t.setAttribute('aria-current', 'page');
-    else t.removeAttribute('aria-current');
-  });
   const view = $('#view');
   if (state.admin.viewAs && !['history', 'stats'].includes(state.view)) state.view = 'history';
+  // V3.3: «training» gibt es nur, solange ein Training läuft; sonst Startseite
+  if (state.view === 'training' && !activeWorkout()) state.view = 'home';
   let html;
   if (state.view === 'history') html = renderHistory();
   else if (state.view === 'stats') html = renderStats();
   else if (state.view === 'settings') html = renderSettings();
   else if (state.view === 'admin') html = renderAdmin();
-  else html = renderTraining();
+  else if (state.view === 'training') html = renderTraining();
+  else { state.view = 'home'; html = renderHome(); }
   view.innerHTML = testBannerHtml() + viewAsBannerHtml() + html;
+
+  document.body.dataset.view = state.view;
+  document.querySelectorAll('.nav button').forEach((t) => {
+    if (t.dataset.view === 'training') t.hidden = !activeWorkout(); // Tab «Aktuelles Training» nur während eines Trainings
+    if (t.dataset.view === state.view || (state.view === 'admin' && t.dataset.view === 'settings')) t.setAttribute('aria-current', 'page');
+    else t.removeAttribute('aria-current');
+  });
+  document.body.classList.toggle('has-live', !!activeWorkout());
 
   if (state.view === 'stats') drawStats();
   if (!activeWorkout()) hideRest();
+  runCountUps();
+  animateColorPickers();
+  state.animateCharts = false;
   tick();
 }
 
 let enterTimer = null;
 function setView(name) {
   state.view = name;
+  state.animateCharts = true;
+  state.openColorName = null;
   render();
   playEnter();
   window.scrollTo(0, 0);
@@ -1222,31 +1279,290 @@ function renderTraining() {
   const active = state.meta.activeWorkoutId && getWorkout(state.meta.activeWorkoutId);
   if (active && state.naming) return renderNaming(active);
   if (active) return renderWorkoutEditor(active);
-  if (state.summary) return renderSummary();
+  state.view = 'home';
+  return renderHome();
+}
 
-  const last = lastWorkoutNamed('');
-  const recent = sortedWorkouts().filter((w) => w.entries.length).slice(0, 3);
-  // Wiederholen: pro Trainingsname eine Zeile; dazu das letzte Training, falls es keinen Namen hat
-  const repeat = workoutNames().map((n) => lastWorkoutNamed(n.name)).filter(Boolean).slice(0, 6);
-  if (last && !last.name) repeat.unshift(last);
+/** V3.3: Startseite (nach «Fertig» zuerst die Zusammenfassung). */
+function renderHome() {
+  if (state.summary) return renderSummary();
+  return renderToday();
+}
+
+/* ---------------------------------------------------------------------
+   V3.3: Startseite «Heute»
+   Eine laute Karte (nächstes Training), darunter Wochenziel, Volumen,
+   letzter Rekord und die übrigen Trainings als Chips. Nur Anzeige,
+   ändert keine Daten. Das Wochenziel liegt in state.prefs.weekGoal.
+   --------------------------------------------------------------------- */
+const ICON_PLAY = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>';
+const ICON_TREND = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 17l6-6 4 4 6-7M15 8h5v5"/></svg>';
+const ICON_FLAME = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3c1 3.5 5 5.5 5 10a5 5 0 0 1-10 0c0-2 1-3.5 2-4.5 0 2 1 3 2 3 0-3-1-5.5 1-8.5z"/></svg>';
+
+function weekGoal() { const g = Number(state.prefs.weekGoal); return g >= 1 && g <= 7 ? g : 3; }
+
+/** Montag der Woche (offset 0 = diese Woche, -1 = letzte Woche …) als ISO-Datum. */
+function mondayISO(offsetWeeks = 0) {
+  const now = parseISODate(todayISO());
+  return toISODate(addDays(now, -((now.getDay() + 6) % 7) + 7 * offsetWeeks));
+}
+function plusDaysISO(iso, n) { return toISODate(addDays(parseISODate(iso), n)); }
+
+/** Abgeschlossene Trainings (mit mindestens einem gültigen Satz), ohne das laufende. */
+function finishedWorkouts() {
+  return state.data.workouts.filter((w) => w.id !== state.meta.activeWorkoutId && w.entries.some((e) => validSets(e).length));
+}
+function trainedDays(from, to) {
+  return new Set(finishedWorkouts().filter((w) => w.date >= from && w.date <= to).map((w) => w.date));
+}
+function weekDayCount(offset) { const mon = mondayISO(offset); return trainedDays(mon, plusDaysISO(mon, 6)).size; }
+
+/** Serie: Wochen in Folge mit erreichtem Wochenziel (diese Woche zählt mit, sobald erreicht). */
+function goalStreak() {
+  const g = weekGoal();
+  let s = 0;
+  for (let k = -1; k > -520 && weekDayCount(k) >= g; k--) s++;
+  if (weekDayCount(0) >= g) s++;
+  return s;
+}
+
+/** Volumen (kg × Wdh., nur Übungen vom Typ Gewicht) zwischen zwei Daten. */
+function volumeBetween(from, to) {
+  let v = 0;
+  for (const w of finishedWorkouts()) {
+    if (w.date < from || w.date > to) continue;
+    for (const en of w.entries) {
+      const ex = getExercise(en.exerciseId);
+      if (!ex || ex.type !== 'weight') continue;
+      for (const s of validSets(en)) v += (s.weight || 0) * s.reps;
+    }
+  }
+  return v;
+}
+
+/**
+ * Vorschlag fürs nächste Training: von den Trainingsnamen der letzten 6 Wochen
+ * der, der am längsten her ist (bei Push/Pull/Beine ergibt das die Reihenfolge).
+ * Sonst einfach das letzte Training.
+ */
+function nextWorkout() {
+  const since = plusDaysISO(todayISO(), -42);
+  const recent = workoutNames().map((n) => lastWorkoutNamed(n.name))
+    .filter((w) => w && w.date >= since && w.id !== state.meta.activeWorkoutId);
+  if (recent.length) return [...recent].sort((a, b) => a.date.localeCompare(b.date))[0];
+  return lastWorkoutNamed('');
+}
+
+/** Kleine Herausforderung aus der ersten Übung: «letztes Mal 60 × 8. Heute 9 Wdh.?» */
+function challengeFor(w) {
+  for (const en of w.entries) {
+    const ex = getExercise(en.exerciseId);
+    if (!ex || ex.type === 'distance') continue;
+    const vs = validSets(en);
+    if (!vs.length) continue;
+    const top = vs.reduce((a, s) => (scoreOf(ex, s) > scoreOf(ex, a) ? s : a));
+    return `${ex.name}: letztes Mal ${setText(ex, top)}. Heute ${top.reps + 1} Wdh.?`;
+  }
+  return '';
+}
+
+/** Letzter Rekord (chronologisch wie im Verlauf gezählt): { w, ex, s } oder null. */
+function lastRecord() {
+  const best = {};
+  let last = null;
+  [...finishedWorkouts()].sort((a, b) => a.date.localeCompare(b.date) || String(a.createdAt || '').localeCompare(String(b.createdAt || '')))
+    .forEach((w) => {
+      for (const en of w.entries) {
+        const ex = getExercise(en.exerciseId);
+        const vs = validSets(en);
+        if (!ex || !vs.length) continue;
+        const top = vs.reduce((a, s) => (scoreOf(ex, s) > scoreOf(ex, a) ? s : a));
+        const sc = scoreOf(ex, top);
+        if (best[ex.id] !== undefined && sc > best[ex.id]) last = { w, ex, s: top };
+        best[ex.id] = Math.max(best[ex.id] ?? 0, sc);
+      }
+    });
+  return last;
+}
+
+/**
+ * «Stärker geworden»: die Übung mit dem grössten Fortschritt der letzten 8 Wochen
+ * (bester Satz im ersten vs. im letzten Training dieser Zeit, nach Kraftwert verglichen).
+ * Anzeige in kg (Gewicht) bzw. Wdh. (Körpergewicht, oder wenn das Gewicht gleich blieb).
+ */
+function biggestGain() {
+  const since = plusDaysISO(todayISO(), -56);
+  const byEx = {};
+  [...finishedWorkouts()].filter((w) => w.date >= since).sort((a, b) => a.date.localeCompare(b.date)).forEach((w) => {
+    for (const en of w.entries) {
+      const ex = getExercise(en.exerciseId);
+      if (!ex || ex.type === 'distance') continue;
+      const vs = validSets(en);
+      if (!vs.length) continue;
+      const top = vs.reduce((a, s) => (scoreOf(ex, s) > scoreOf(ex, a) ? s : a));
+      (byEx[ex.id] || (byEx[ex.id] = { ex, list: [] })).list.push({ date: w.date, s: top, sc: scoreOf(ex, top) });
+    }
+  });
+  let best = null;
+  for (const { ex, list } of Object.values(byEx)) {
+    if (list.length < 2) continue;
+    const a = list[0], b = list[list.length - 1];
+    if (!(a.sc > 0) || b.sc <= a.sc) continue;
+    // nur eindeutigen Fortschritt zeigen: mehr Gewicht, oder gleiches Gewicht mit mehr Wdh.
+    const w0 = a.s.weight || 0, w1 = b.s.weight || 0;
+    if (ex.type === 'weight' && !(w1 > w0 || (w1 === w0 && b.s.reps > a.s.reps))) continue;
+    if (ex.type === 'bodyweight' && !(b.s.reps > a.s.reps)) continue;
+    const rel = b.sc / a.sc - 1;
+    if (!best || rel > best.rel) best = { ex, a, b, rel, list };
+  }
+  if (!best) return null;
+  const { ex, a, b } = best;
+  const dw = (b.s.weight || 0) - (a.s.weight || 0);
+  const dr = b.s.reps - a.s.reps;
+  const useKg = ex.type === 'weight' && dw > 0;
+  const days = Math.round((parseISODate(b.date) - parseISODate(a.date)) / 86400000);
+  return {
+    ex,
+    big: useKg ? `+${fmtNum(dw)}` : `+${Math.max(dr, 1)}`,
+    unit: useKg ? 'kg' : 'Wdh.',
+    weeks: Math.max(1, Math.round(days / 7)),
+    points: best.list.map((p) => p.sc),
+  };
+}
+function monthCount() {
+  const t = todayISO();
+  return trainedDays(t.slice(0, 8) + '01', t).size;
+}
+
+function tonsHtml(kg) { return kg >= 1000 ? `${fmtNum(kg / 1000, 1)}<small> t</small>` : `${thousand(kg)}<small> kg</small>`; }
+
+function sparkHtml(vals) {
+  if (vals.length < 2 || !vals.some((v) => v > 0)) return '';
+  const max = Math.max(...vals), min = Math.min(...vals);
+  const pts = vals.map((v, i) => `${((i / (vals.length - 1)) * 100).toFixed(1)},${(22 - ((v - min) / (max - min || 1)) * 19).toFixed(1)}`).join(' ');
+  return `<svg class="spark" viewBox="0 0 100 24" preserveAspectRatio="none" aria-hidden="true"><polyline pathLength="1" points="${pts}"/></svg>`;
+}
+
+function ringHtml(frac, big, small) {
+  const C = 2 * Math.PI * 32;
+  const off = C * (1 - Math.max(0, Math.min(1, frac)));
+  return `<svg class="ring" viewBox="0 0 80 80" role="img" aria-label="${esc(big)} ${esc(small)}">
+    <circle class="ring-bg" cx="40" cy="40" r="32"/>
+    <circle class="ring-fg" cx="40" cy="40" r="32" style="--c:${C.toFixed(1)};--off:${off.toFixed(1)}"/>
+    <text x="40" y="40" class="ring-v">${esc(big)}</text><text x="40" y="54" class="ring-l">${esc(small)}</text></svg>`;
+}
+
+function weekDotsHtml() {
+  const mon = mondayISO(0);
+  const days = trainedDays(mon, plusDaysISO(mon, 6));
+  const today = todayISO();
+  const L = ['Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So'];
+  return `<div class="dots">${L.map((l, i) => { const d = plusDaysISO(mon, i); return `<i class="${days.has(d) ? 'on' : ''} ${d === today ? 'now' : ''}" title="${l}"></i>`; }).join('')}</div>
+    <div class="dots-l">${L.map((l) => `<span>${l}</span>`).join('')}</div>`;
+}
+
+function renderToday() {
+  const today = todayISO();
+  const goal = weekGoal();
+  const wc = weekDayCount(0);
+  const left = Math.max(0, goal - wc);
+  const streak = goalStreak();
+  const next = nextWorkout();
+  const hello = myName() ? `Hey ${esc(firstWord(myName()))},` : 'Hey,';
+
+  // übrige Trainings als Chips (pro Name das letzte), ohne das vorgeschlagene
+  const others = workoutNames().map((n) => lastWorkoutNamed(n.name)).filter((w) => w && (!next || w.id !== next.id)).slice(0, 6);
+  const lastAny = lastWorkoutNamed('');
+  if (lastAny && !lastAny.name && (!next || lastAny.id !== next.id)) others.unshift(lastAny);
+
+  const gain = biggestGain();
+  const rec = lastRecord();
+
+  const nextSets = next ? next.entries.reduce((a, en) => a + validSets(en).length, 0) : 0;
+  const nextEx = next ? next.entries.filter((en) => validSets(en).length).length : 0;
+  const challenge = next ? challengeFor(next) : '';
+
+  // V3.3: läuft gerade ein Training → statt «Als Nächstes» die Karte zum Weitermachen
+  const live = activeWorkout();
+  const liveC = live ? sessionCounts(live) : null;
+  const liveMin = live ? Math.max(0, Math.floor((Date.now() - Date.parse(live.createdAt || '')) / 60000)) : 0;
+  const hero = live ? `
+      <section class="next live">
+        <div class="next-top"><span class="eyebrow"><i class="live-dot"></i>Läuft gerade</span><span>seit ${Number.isFinite(liveMin) && liveMin < 720 ? `${liveMin} min` : '–'}</span></div>
+        <h2 class="next-name">${live.name ? esc(live.name) : 'Aktuelles Training'}</h2>
+        <div class="next-stats">
+          <div><b class="tnum">${live.entries.length}</b><span>${live.entries.length === 1 ? 'Übung' : 'Übungen'}</span></div>
+          <div><b class="tnum">${liveC.done}<small>/${liveC.all}</small></b><span>Sätze</span></div>
+          <div><b class="tnum">${liveC.all ? Math.round((liveC.done / liveC.all) * 100) : 0} %</b><span>geschafft</span></div>
+        </div>
+        <button class="next-go" data-action="nav" data-view="training">${ICON_PLAY}Weitermachen</button>
+      </section>` : next ? `
+      <section class="next">
+        <div class="next-top"><span class="eyebrow">Als Nächstes</span><span>zuletzt ${esc(relativeDay(next.date).replace(/^(Heute|Gestern)$/, (m) => m.toLowerCase()))}</span></div>
+        <h2 class="next-name">${next.name ? esc(next.name) : 'Letztes Training'}</h2>
+        <div class="next-stats">
+          <div><b class="tnum">${nextEx}</b><span>${nextEx === 1 ? 'Übung' : 'Übungen'}</span></div>
+          <div><b class="tnum">${nextSets}</b><span>Sätze</span></div>
+          <div><b class="tnum">${next.durationMin ? `${next.durationMin}′` : '–'}</b><span>Dauer</span></div>
+        </div>
+        ${challenge ? `<p class="next-goal">${ICON_TREND}${esc(challenge)}</p>` : ''}
+        <button class="next-go" data-action="start-repeat" data-id="${esc(next.id)}">${ICON_PLAY}Training starten</button>
+      </section>` : `
+      <section class="next">
+        <div class="next-top"><span class="eyebrow">Los geht's</span></div>
+        <h2 class="next-name">Erstes Training</h2>
+        <p class="next-goal">Trag deine Sätze direkt nach dem Satz ein. Danach siehst du hier, was als Nächstes dran ist.</p>
+        <button class="next-go" data-action="start-empty">${ICON_PLAY}Training starten</button>
+      </section>`;
 
   return `
-    <div class="head"><div><h1 class="title">Training</h1><p class="sub">${myName() ? `Hallo ${esc(firstWord(myName()))}, ` : ''}${esc(formatDate(todayISO()))}</p></div></div>
-    ${v1NoticeHtml()}
-    <div class="start card">
-      ${repeat.length ? `<div class="start-h">Wiederholen</div>
-        <div class="start-list">${repeat.map((w, i) => `
-          <button class="start-row ${i === 0 ? 'first' : ''}" data-action="start-repeat" data-id="${esc(w.id)}" style="--i:${i}">
-            <span class="start-name">${w.name ? esc(w.name) : 'Letztes Training'}</span>
-            <span class="start-when">${esc(relativeDay(w.date))}</span>
-            <i class="chev">${ICON_CHEVRON}</i>
-          </button>`).join('')}</div>` : ''}
-      <button class="btn ${repeat.length ? 'btn-s' : 'btn-p'} block start-empty" data-action="start-empty">${ICON_PLUS}<span>Leeres Training</span></button>
+    <div class="today-head">
+      <div>
+        <p class="sub">${esc(parseISODate(today).toLocaleDateString('de-CH', { weekday: 'long', day: 'numeric', month: 'long' }))}</p>
+        <h1 class="title">${hello}<br>Zeit für ein <span class="hl">Training!</span></h1>
+      </div>
+      ${streak ? `<span class="streak" title="${streak} ${streak === 1 ? 'Woche' : 'Wochen'} in Folge Wochenziel erreicht">${ICON_FLAME}<b class="tnum">${streak}</b> ${streak === 1 ? 'Woche' : 'Wochen'}</span>` : ''}
     </div>
-    <div class="card"><div class="eyebrow">Diese Woche</div>${weekStrip()}</div>
-    ${recent.length ? `
-      <div class="eyebrow">Zuletzt</div>
-      <div class="card log">${recent.map((w) => logRow(w, 0)).join('')}</div>` : ''}`;
+    ${v1NoticeHtml()}
+    <div class="today-grid">
+      ${hero}
+      <div class="today-side">
+        <section class="card goal" data-action="nav" data-view="settings" title="Wochenziel unter «Mehr» ändern">
+          ${ringHtml(wc / goal, `${wc}/${goal}`, 'Ziel')}
+          <div class="goal-txt">
+            <b>Wochenziel</b>
+            <span>${left ? `Noch ${left} ${left === 1 ? 'Training' : 'Trainings'} bis Sonntag` : 'Geschafft! Alles weitere ist Bonus.'}</span>
+            ${weekDotsHtml()}
+          </div>
+        </section>
+        ${next ? `<div class="minis">
+          ${gain ? `<button class="card mini mini-gain" data-action="goto-ex" data-id="${esc(gain.ex.id)}">
+            <span class="eyebrow">Stärker geworden</span>
+            <b class="mini-v tnum">${esc(gain.big)}<small> ${esc(gain.unit)}</small></b>
+            ${sparkHtml(gain.points)}
+            <span class="mini-n">${esc(gain.ex.name)}</span>
+            <span class="mini-d">in ${gain.weeks} ${gain.weeks === 1 ? 'Woche' : 'Wochen'}</span>
+          </button>` : `<section class="card mini">
+            <span class="eyebrow">Diesen Monat</span>
+            <b class="mini-v tnum">${monthCount()}<small> ${monthCount() === 1 ? 'Training' : 'Trainings'}</small></b>
+            <span class="mini-d">Dranbleiben lohnt sich: hier erscheint bald dein Fortschritt.</span>
+          </section>`}
+          ${rec ? `<button class="card mini mini-pr" data-action="goto-ex" data-id="${esc(rec.ex.id)}">
+            <span class="eyebrow">Letzter Rekord</span>
+            <b class="mini-v tnum">${rec.ex.type === 'bodyweight' ? `${rec.s.reps}<small> Wdh.</small>` : rec.ex.type === 'distance' ? `${fmtNum(rec.s.weight)}<small> km</small>` : `${fmtNum(rec.s.weight)}<small> kg</small>`}</b>
+            <span class="mini-n">${esc(rec.ex.name)}${rec.ex.type === 'weight' ? ` · ${rec.s.reps} Wdh.` : ''}</span>
+            <span class="mini-d">${esc(relativeDay(rec.w.date))}</span>
+          </button>` : `<section class="card mini"><span class="eyebrow">Rekorde</span><span class="mini-n">Sobald du ein Gewicht schlägst, erscheint es hier.</span></section>`}
+        </div>` : ''}
+      </div>
+    </div>
+    <div ${live ? 'hidden' : ''}>
+      ${others.length ? '<div class="eyebrow" style="margin:0 2px 8px">Oder lieber</div>' : ''}
+      <div class="chips" ${others.length ? '' : 'hidden'}>
+        ${others.map((w) => `<button class="chip chip-name ${w.name ? tagClass(w.name) : ''}" data-action="start-repeat" data-id="${esc(w.id)}">${w.name ? '<i class="tag-dot"></i>' : ''}${w.name ? esc(w.name) : 'Letztes Training'} <small>${esc(relativeDay(w.date))}</small></button>`).join('')}
+      </div>
+      ${next ? `<button class="btn new-training block" data-action="start-empty">${ICON_PLUS}<span>Neues Training</span></button>` : ''}
+    </div>`;
 }
 
 function weekStrip() {
@@ -1265,20 +1581,80 @@ function weekStrip() {
 
 function renderSummary() {
   const s = state.summary;
+  const fresh = s.fresh;
+  s.fresh = false; // nächstes Neuzeichnen (z.B. Sync) ohne Konfetti
+  const goal = weekGoal();
+  const tons = s.vol >= 1000;
+  const count = (n, dec = 0) => (fresh ? `<span data-count="${n}" data-dec="${dec}">0</span>` : fmtNum(n, dec));
+  const pct = (a, b) => (b ? Math.round(((a - b) / b) * 100) : null);
+  const vp = s.prev ? pct(s.vol, s.prev.vol) : null;
+  const sd = s.prev ? s.sets - s.prev.sets : 0;
+  const colors = ['var(--accent-ink)', 'var(--pr)', 'var(--done)', 'var(--surface)'];
+  const confetti = fresh ? `<div class="confetti" aria-hidden="true">${Array.from({ length: 34 }, (_, i) =>
+    `<i style="--x:${(i * 37) % 100}%;--d:${((i * 7) % 10) / 20}s;--r:${((i * 53) % 720) - 360}deg;--c:${colors[i % 4]};--s:${0.8 + ((i * 13) % 9) / 10}"></i>`).join('')}</div>` : '';
+
   return `
     <div class="card done-hero">
+      ${confetti}
       <div class="eyebrow">Gespeichert</div>
       <h1 class="title">${s.name ? esc(s.name) : 'Training'} abgeschlossen</h1>
       <p class="muted">${esc(s.names)}</p>
     </div>
     <div class="stats stats-3">
-      <div class="stat"><div class="v">${s.min === null ? '–' : s.min}</div><div class="l">Minuten</div></div>
-      <div class="stat"><div class="v">${s.sets}</div><div class="l">Sätze</div></div>
-      <div class="stat"><div class="v">${s.prs.length}</div><div class="l">Rekorde</div></div>
+      <div class="stat"><div class="v">${s.min === null ? '–' : count(s.min)}</div><div class="l">Minuten</div></div>
+      <div class="stat"><div class="v">${count(s.sets)}</div><div class="l">Sätze</div></div>
+      <div class="stat"><div class="v ${s.prs.length ? 'gold' : ''}">${count(s.prs.length)}</div><div class="l">Rekorde</div></div>
     </div>
-    ${s.prs.length ? `<div class="card"><div class="eyebrow">Neue Rekorde</div>${s.prs.map((p) => `
+    ${s.prs.length ? `<div class="card prs-card"><div class="eyebrow">${ICON_STAR} ${s.prs.length === 1 ? 'Neuer Rekord' : `${s.prs.length} neue Rekorde`}</div>${s.prs.map((p) => `
       <div class="side-row"><span>${esc(p.name)}</span><b>${esc(p.text)}</b></div>`).join('')}</div>` : ''}
+    ${s.prev ? `<div class="card cmp">
+      <div class="eyebrow">Im Vergleich zu ${esc(s.name)} am ${esc(formatDate(s.prev.date, 'short'))}</div>
+      ${improvedHtml(s)}
+      <div class="cmp-row"><span>Sätze</span><b class="${sd >= 0 ? 'up' : 'down'}">${sd > 0 ? '+' : sd < 0 ? '−' : '±'}${Math.abs(sd)}</b></div>
+    </div>` : ''}
+    <div class="card goal">
+      ${ringHtml(s.weekAfter / goal, `${s.weekAfter}/${goal}`, 'Woche')}
+      <div class="goal-txt">
+        <b>${s.weekAfter >= goal ? 'Wochenziel erreicht!' : 'Wochenziel'}</b>
+        <span>${s.weekAfter > s.weekBefore ? 'Dieses Training zählt: ein Tag mehr diese Woche.' : 'Heute war schon ein Trainingstag.'}</span>
+        ${weekDotsHtml()}
+      </div>
+    </div>
     <button class="btn btn-p block" data-action="summary-close">Zur Übersicht</button>`;
+}
+
+/** Abschluss: «Verbessert: 2 von 4 Übungen» (nur wenn es etwas zu vergleichen gab). */
+function improvedHtml(s) {
+  if (!s.compared) return '';
+  return `<div class="cmp-row"><span>Verbessert</span><b class="${s.improved ? 'up' : 'down'}">${s.improved} von ${s.compared} ${s.compared === 1 ? 'Übung' : 'Übungen'}</b></div>`;
+}
+
+/** Farbauswahl (Mehr → Trainingsfarben) nach dem Zeichnen auf- oder zuklappen lassen. */
+function animateColorPickers() {
+  if (!state.colorAnim) return;
+  state.colorAnim = null;
+  const el = document.querySelector('.nc-sw[data-anim="open"], .nc-sw[data-anim="close"]');
+  if (!el) return;
+  const dir = el.dataset.anim;
+  el.removeAttribute('data-anim');
+  void el.offsetWidth; // Startzustand zeichnen, dann Übergang
+  requestAnimationFrame(() => el.classList.toggle('open', dir === 'open'));
+}
+
+/** Zahlen mit data-count von 0 hochzählen (nach dem Zeichnen). */
+function runCountUps() {
+  document.querySelectorAll('[data-count]').forEach((el) => {
+    const to = Number(el.dataset.count), dec = Number(el.dataset.dec || 0);
+    el.removeAttribute('data-count');
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) { el.textContent = fmtNum(to, dec); return; }
+    const t0 = performance.now();
+    const step = (t) => {
+      const p = Math.min(1, (t - t0) / 900);
+      el.textContent = fmtNum(to * (1 - Math.pow(1 - p, 3)), dec);
+      if (p < 1) requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  });
 }
 
 /** Erstes Wort eines Namens (für die Begrüssung), E-Mail → Teil vor dem @. */
@@ -1297,21 +1673,56 @@ function viewAsBannerHtml() {
     </div>`;
 }
 
-/** Zeile im Verlauf: zugeklappt nur Name + Datum, aufgeklappt alle Übungen. */
+/** Vorheriger Eintrag derselben Übung vor diesem Training (für «+2.5 kg» im Verlauf). */
+function prevEntryBefore(exerciseId, w) {
+  const list = sortedWorkouts();
+  const idx = list.findIndex((x) => x.id === w.id);
+  for (let i = idx + 1; i < list.length; i++) {
+    const en = list[i].entries.find((e) => e.exerciseId === exerciseId && validSets(e).length);
+    if (en) return en;
+  }
+  return null;
+}
+function topSetOf(ex, en) {
+  const vs = validSets(en);
+  return vs.length ? vs.reduce((a, s) => (scoreOf(ex, s) > scoreOf(ex, a) ? s : a)) : null;
+}
+
+/** Zeile im Verlauf: zugeklappt Name, Datum und Kennzahlen; aufgeklappt alle Übungen mit Veränderung. */
 function logRow(w, prCount) {
   const d = parseISODate(w.date);
-  return `<details>
+  const nSets = w.entries.reduce((a, en) => a + validSets(en).length, 0);
+  const nEx = w.entries.filter((en) => validSets(en).length).length;
+  const onlyRun = w.entries.length === 1 && (getExercise(w.entries[0].exerciseId) || {}).type === 'distance';
+  const meta = onlyRun
+    ? (validSets(w.entries[0]).map((s) => setText(getExercise(w.entries[0].exerciseId), s)).join(', ') || '–')
+    : `${nEx} ${nEx === 1 ? 'Übung' : 'Übungen'} · ${nSets} ${nSets === 1 ? 'Satz' : 'Sätze'}${w.durationMin ? ` · ${w.durationMin} min` : ''}`;
+  return `<details class="${tagClass(w.name)}">
     <summary>
       <div class="date"><b>${d.getDate()}</b><span>${esc(d.toLocaleDateString('de-CH', { weekday: 'short' }).replace('.', ''))}</span></div>
-      <div class="t ${w.name ? '' : 'unnamed'}">${w.name ? esc(w.name) : 'Training'}</div>
+      <div class="lr-main"><div class="t ${w.name ? '' : 'unnamed'}">${w.name ? esc(w.name) : 'Training'}</div><div class="lr-meta">${esc(meta)}</div></div>
       <span class="log-end">${prCount > 0 ? `<span class="badge" title="${prCount} ${prCount === 1 ? 'Rekord' : 'Rekorde'}">${ICON_STAR}${prCount}</span>` : ''}<i class="chev">${ICON_CHEVRON}</i></span>
     </summary>
     <div class="log-body">
       ${w.entries.map((en) => {
         const ex = getExercise(en.exerciseId);
         if (!ex) return '';
-        const list = validSets(en).map((s) => esc(setText(ex, s))).join(', ') || '–';
-        return `<div><span>${esc(ex.name)}${en.variant ? ` <small class="muted">(${esc(en.variant)})</small>` : ''}</span><span>${list}</span></div>`;
+        const vs = validSets(en);
+        let delta = '';
+        const prevEn = ex.type !== 'distance' ? prevEntryBefore(ex.id, w) : null;
+        const t = topSetOf(ex, en), pt = prevEn && topSetOf(ex, prevEn);
+        if (t && pt) {
+          const isBw = ex.type === 'bodyweight';
+          const dv = isBw ? t.reps - pt.reps : (t.weight || 0) - (pt.weight || 0);
+          const dr = t.reps - pt.reps;
+          const u = isBw ? ' Wdh.' : ' kg';
+          delta = dv > 0 ? `<span class="dl up">+${fmtNum(dv)}${u}</span>`
+            : dv < 0 ? `<span class="dl down">−${fmtNum(-dv)}${u}</span>`
+            : !isBw && dr > 0 ? `<span class="dl up">+${dr} Wdh.</span>`
+            : !isBw && dr < 0 ? `<span class="dl down">−${-dr} Wdh.</span>` : '<span class="dl">=</span>';
+        }
+        return `<div class="lx"><span class="lx-n">${esc(ex.name)}${en.variant ? ` <small class="muted">(${esc(en.variant)})</small>` : ''}</span>${delta}
+          <div class="sx">${vs.length ? vs.map((s) => `<span>${esc(setText(ex, s))}</span>`).join('') : '<span>–</span>'}</div></div>`;
       }).join('')}
       ${w.note ? `<p class="log-note">${esc(w.note)}</p>` : ''}
       ${state.admin.viewAs ? '' : `<button class="btn btn-s" data-action="open-workout" data-id="${esc(w.id)}">Bearbeiten</button>`}
@@ -1388,11 +1799,39 @@ function renderEntry(w, entry, focus, best) {
   const last = lastEntryFor(ex.id, w.id);
   const done = entry.sets.filter((s, i) => isDone(w, entry, i)).length;
   const hasPR = entry.sets.some((s, i) => isPR(ex, s, isDone(w, entry, i), best));
+  const allDone = entry.sets.length > 0 && done === entry.sets.length;
+  const isCur = focus && focus.entry === entry.id;
+
+  // V3.3: fertige Übung im heutigen Training → eine Zeile (antippen zum Aufklappen)
+  if (allDone && w.date === todayISO() && !(state.openEntries && state.openEntries.has(entry.id))) {
+    return `
+    <section class="card ex entry collapsed" data-entry="${esc(entry.id)}">
+      <button class="ex-sum" data-action="toggle-entry" data-entry="${esc(entry.id)}" aria-expanded="false">
+        <i class="ok">${ICON_CHECK}</i>
+        <span class="ex-sum-t"><b>${esc(ex.name)}</b><small>${entry.sets.map((s) => esc(setText(ex, s))).join(' · ')}</small></span>
+        ${hasPR ? `<span class="badge">${ICON_STAR}REKORD</span>` : ''}
+        <i class="chev">${ICON_CHEVRON}</i>
+      </button>
+    </section>`;
+  }
+
+  // V3.3: Ziel heute = bester Satz vom letzten Mal mit einer Wiederholung mehr
+  let goalHtml = '';
+  if (last && !isDist) {
+    const vs = validSets(last.entry);
+    if (vs.length) {
+      const top = vs.reduce((a, s) => (scoreOf(ex, s) > scoreOf(ex, a) ? s : a));
+      const goalText = isBw ? (top.weight ? `+${fmtNum(top.weight)} kg × ${top.reps + 1}` : `${top.reps + 1} Wdh.`) : `${fmtNum(top.weight || 0)} × ${top.reps + 1}`;
+      goalHtml = `<div class="ex-goal"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3.5"/></svg><span>Ziel heute <b>${esc(goalText)}</b></span><span class="muted">· letztes Mal ${esc(relativeDay(last.workout.date).replace(/^(Heute|Gestern)$/, (m) => m.toLowerCase()))}</span></div>`;
+    }
+  }
 
   return `
-    <section class="card ex grid entry" data-entry="${esc(entry.id)}">
+    <section class="card ex grid entry ${isCur ? 'is-cur' : ''}" data-entry="${esc(entry.id)}">
       <div class="ex-h"><h3>${esc(ex.name)}</h3>${hasPR ? `<span class="badge">${ICON_STAR}REKORD</span>` : ''}<span class="ex-c">${done}/${entry.sets.length}</span>
+        ${allDone && w.date === todayISO() ? `<button class="x" data-action="toggle-entry" data-entry="${esc(entry.id)}" aria-label="Zuklappen" aria-expanded="true"><span class="chev-up">${ICON_CHEVRON}</span></button>` : ''}
         <button class="x" data-action="remove-entry" data-entry="${esc(entry.id)}" aria-label="${esc(ex.name)} entfernen">${ICON_X}</button></div>
+      ${goalHtml}
       ${isBw ? `<div class="ex-variant"><input class="input" data-field="entry-variant" data-entry="${esc(entry.id)}" value="${esc(entry.variant)}"
         placeholder="Variante, z.B. Stufe 2 oder assistiert" maxlength="60" aria-label="Variante"></div>` : ''}
       <div>
@@ -1482,11 +1921,23 @@ function historicPRCounts() {
 }
 
 function renderHistory() {
-  const workouts = sortedWorkouts();
+  const all = sortedWorkouts();
+  // V3.3: Filter nach Trainingsname (nur Anzeige)
+  const names = workoutNames().map((n) => n.name);
+  const filter = state.histFilter && (state.histFilter === '__none' || names.some((n) => n.toLowerCase() === state.histFilter.toLowerCase())) ? state.histFilter : '';
+  const workouts = !filter ? all
+    : filter === '__none' ? all.filter((w) => !w.name)
+    : all.filter((w) => w.name.toLowerCase() === filter.toLowerCase());
   const head = `<div class="head"><div><h1 class="title">Verlauf</h1><p class="sub">${workouts.length} ${workouts.length === 1 ? 'Training' : 'Trainings'}</p></div></div>`;
-  if (!workouts.length) {
+  if (!all.length) {
     return head + `<div class="card"><p class="empty">${state.admin.viewAs ? 'Dieses Konto hat noch keine Trainings.' : 'Noch keine Trainings. Starte eines unter «Training».'}</p></div>`;
   }
+  const chips = names.length > 1 || all.some((w) => !w.name) ? `
+    <div class="chips-scroll" role="group" aria-label="Nach Training filtern">
+      <button class="chip" data-action="hist-filter" data-name="" aria-pressed="${!filter}">Alle</button>
+      ${names.map((n) => `<button class="chip ${tagClass(n)}" data-action="hist-filter" data-name="${esc(n)}" aria-pressed="${filter.toLowerCase() === n.toLowerCase()}"><i class="tag-dot"></i>${esc(n)}</button>`).join('')}
+      ${all.some((w) => !w.name) ? `<button class="chip" data-action="hist-filter" data-name="__none" aria-pressed="${filter === '__none'}">Ohne Namen</button>` : ''}
+    </div>` : '';
   const prs = historicPRCounts();
   const groups = [];
   for (const w of workouts) {
@@ -1494,9 +1945,12 @@ function renderHistory() {
     if (!groups.length || groups[groups.length - 1].m !== m) groups.push({ m, items: [] });
     groups[groups.length - 1].items.push(w);
   }
-  return head + groups.map((g) => `
-    <div class="month"><span class="eyebrow">${esc(g.m)}</span><span class="small muted tnum">${g.items.length} ${g.items.length === 1 ? 'Training' : 'Trainings'}</span></div>
-    <div class="card log">${g.items.map((w) => logRow(w, prs[w.id] || 0)).join('')}</div>`).join('');
+  return head + chips + groups.map((g) => {
+    const nPr = g.items.reduce((a, w) => a + (prs[w.id] || 0), 0);
+    return `
+    <div class="month"><span class="eyebrow">${esc(g.m)}</span><span class="ms-stats tnum"><b>${g.items.length}</b> ${g.items.length === 1 ? 'Training' : 'Trainings'}${nPr ? ` · <b class="gold">${nPr}</b> ${ICON_STAR}` : ''}</span></div>
+    <div class="card log">${g.items.map((w) => logRow(w, prs[w.id] || 0)).join('')}</div>`;
+  }).join('');
 }
 
 /* --- Fortschritt --- */
@@ -1530,7 +1984,15 @@ function renderStats() {
   const prev = r.days
     ? periodStats(toISODate(addDays(parseISODate(rangeStartISO()), -r.days)), toISODate(addDays(parseISODate(rangeStartISO()), -1)))
     : null;
-  const delta = (a, b, f = (x) => x) => (prev ? `<div class="d">${a - b >= 0 ? '+' : '−'}${f(Math.abs(a - b))} zur Vorperiode</div>` : '');
+  const delta = (a, b, f = (x) => x) => (prev ? `<div class="d ${a - b > 0 ? 'up' : ''}">${a - b >= 0 ? '+' : '−'}${f(Math.abs(a - b))} zur Vorperiode</div>` : '');
+  // V3.3: Mini-Kurven pro Woche (neueste rechts)
+  const nWeeks = Math.max(4, Math.min(16, r.days ? Math.round(r.days / 7) : 16));
+  const weekly = Array.from({ length: nWeeks }, (_, i) => { const m = mondayISO(i - nWeeks + 1); return periodStats(m, plusDaysISO(m, 6)); });
+  // V3.3: Aufteilung nach Trainingsname im Zeitraum
+  const split = new Map();
+  inRange.forEach((w) => { const k = w.name || 'Ohne Namen'; split.set(k, (split.get(k) || 0) + 1); });
+  const splitTotal = inRange.length || 1;
+  const splitList = [...split.entries()].sort((a, b) => b[1] - a[1]);
 
   const exercises = exercisesByRecency().filter((e) => exerciseUseCount(e.id) > 0);
   if (!state.statsExerciseId || !exercises.some((e) => e.id === state.statsExerciseId)) {
@@ -1560,9 +2022,9 @@ function renderStats() {
     <div class="head"><div><h1 class="title">Fortschritt</h1></div>
       <div class="seg" role="group" aria-label="Zeitraum">${Object.entries(RANGES).map(([key, v]) =>
         `<button data-action="set-range" data-range="${key}" aria-pressed="${state.prefs.range === key}">${v.label}</button>`).join('')}</div></div>
-    <div class="stats stats-3">
-      <div class="stat"><div class="v">${days.size}</div><div class="l">Trainingstage</div>${delta(cur.days, prev && prev.days)}</div>
-      <div class="stat"><div class="v">${thousand(cur.sets)}</div><div class="l">Sätze</div>${delta(cur.sets, prev && prev.sets)}</div>
+    <div class="stats stats-3 stats-spark">
+      <div class="stat"><div class="v">${days.size}</div><div class="l">Trainingstage</div>${sparkHtml(weekly.map((x) => x.days))}${delta(cur.days, prev && prev.days)}</div>
+      <div class="stat"><div class="v">${thousand(cur.sets)}</div><div class="l">Sätze</div>${sparkHtml(weekly.map((x) => x.sets))}${delta(cur.sets, prev && prev.sets)}</div>
       <div class="stat"><div class="v">${cur.avgMin === null ? '–' : `${cur.avgMin}<small> min</small>`}</div><div class="l">Ø Dauer</div>${cur.avgMin !== null && prev && prev.avgMin !== null ? delta(cur.avgMin, prev.avgMin, (x) => x + ' min') : ''}</div>
     </div>
     <div class="st-grid">
@@ -1573,7 +2035,7 @@ function renderStats() {
           ${series.length ? `
             <div class="hero" id="exBest">
               <div><div class="eyebrow">${isDist ? `Distanz letztes Training${lastP.pace ? `, Tempo ${esc(lastP.pace)} /km` : ''}` : isBw ? 'Meiste Wiederholungen im Satz' : 'Kraftwert'}</div><div class="big">${fmtNum(lastP.primary, 1)}<small>${unit}</small></div></div>
-              ${change !== null ? `<div class="delta ${change < 0 ? 'down' : ''}">${change >= 0 ? '+' : '−'}${fmtNum(Math.abs(change), 1)} ${unit} seit ${esc(formatDate(toISODate(new Date(series[0].x)), 'short'))}</div>` : ''}
+              ${change !== null ? `<div class="delta delta-pill ${change < 0 ? 'down' : ''}">${change >= 0 ? '+' : '−'}${fmtNum(Math.abs(change), 1)} ${unit} seit ${esc(formatDate(toISODate(new Date(series[0].x)), 'short'))}</div>` : ''}
             </div>
             <div class="legend">${isDist ? '<span><i></i>Distanz pro Training</span>' : isBw
               ? '<span><i></i>Max. Wdh.</span><span><i class="dash"></i>Wdh. total</span>'
@@ -1585,11 +2047,11 @@ function renderStats() {
                 : isBw
                 ? `<td>${fmtNum(p.primary, 1)}</td><td>${fmtNum(p.secondary, 1)}</td>`
                 : `<td>${fmtNum(p.primary, 1)}</td><td>${fmtNum(p.raw, 1)}</td><td>${fmtNum(p.avgWeight, 1)} kg × ${fmtNum(p.avgReps, 1)}</td>`}</tr>`).join('')}</tbody></table></div></details>
-            <p class="small muted">${isDist
+            <details class="tbl"><summary>Wie wird gerechnet?</summary><p class="small muted" style="margin-top:6px">${isDist
               ? 'Linie: gelaufene Kilometer pro Training. Tempo = Zeit pro Kilometer.'
               : isBw
               ? 'Linie: meiste Wiederholungen in einem Satz pro Tag. Gestrichelt: Wiederholungen total.'
-              : 'Kraftwert: Gewicht mit Bonus für Wiederholungen. Pro Training zählen alle Sätze, Sätze mit vielen Wiederholungen zählen mehr. Die Linie ist gebremst: Ein einzelnes Ausreisser-Training (z.B. einmal 1×60 statt 8×20) bewegt sie nur wenig. Echter Fortschritt über mehrere Trainings kommt voll an. Die Punkte zeigen die einzelnen Trainings.'}</p>`
+              : 'Kraftwert: Gewicht mit Bonus für Wiederholungen. Pro Training zählen alle Sätze, Sätze mit vielen Wiederholungen zählen mehr. Die Linie ist gebremst: Ein einzelnes Ausreisser-Training (z.B. einmal 1×60 statt 8×20) bewegt sie nur wenig. Echter Fortschritt über mehrere Trainings kommt voll an. Die Punkte zeigen die einzelnen Trainings.'}</p></details>`
           : `<div id="exBest"></div><p class="muted">Keine Sätze im Zeitraum «${esc(r.label)}».</p>`}`
         : '<p class="empty">Sobald du Sätze mit Wiederholungen einträgst, erscheint hier deine Kurve.</p>'}
       </div>
@@ -1597,13 +2059,24 @@ function renderStats() {
         <div class="eyebrow">Trainingstage</div>
         <div class="hm-wrap" id="heatmapWrap"></div>
         <div class="hm-leg">weniger <span class="cell" data-l="0"></span><span class="cell" data-l="1"></span><span class="cell" data-l="2"></span><span class="cell" data-l="3"></span><span class="cell" data-l="4"></span> mehr Sätze</div>
+        ${splitList.length > 1 ? `
+        <div class="eyebrow" style="margin-top:4px">Aufteilung</div>
+        <div class="split">${splitList.map(([n, c]) => `<i class="${n === 'Ohne Namen' ? 'tc-grau' : tagClass(n)}" style="flex:${c}" title="${esc(n)}: ${c}"></i>`).join('')}</div>
+        <div class="split-l">${splitList.map(([n, c]) => `<span class="${n === 'Ohne Namen' ? 'tc-grau' : tagClass(n)}"><i class="tag-dot"></i>${esc(n)} <b class="tnum">${Math.round((c / splitTotal) * 100)} %</b></span>`).join('')}</div>` : ''}
       </div>
       ${bests.length ? `<div class="card">
-        <div class="eyebrow">Bestwerte</div>
-        <div>${bests.map((b) => `<button class="pr-row" data-action="stats-ex" data-id="${esc(b.e.id)}"><b>${esc(b.e.name)}</b><span class="kg">${esc(setText(b.e, b.top.s))}</span><small>${esc(formatDate(b.top.date, 'short'))}</small></button>`).join('')}</div>
+        <div class="eyebrow">Rekord-Wand</div>
+        <div class="medals">${[...bests].sort((a, b) => b.top.date.localeCompare(a.top.date)).map((b) => {
+          const isNew = Math.round((parseISODate(todayISO()) - parseISODate(b.top.date)) / 86400000) <= 7;
+          return `<button class="medal-row" data-action="stats-ex" data-id="${esc(b.e.id)}">
+            <i class="medal ${isNew ? 'new' : ''}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3h8l-2.5 6h-3z"/><circle cx="12" cy="15" r="6"/><path d="M12 12.3l.9 1.8 2 .3-1.45 1.4.35 2-1.8-.95-1.8.95.35-2L9.1 14.4l2-.3z"/></svg></i>
+            <span class="mr-t"><b>${esc(b.e.name)}</b><small>${esc(formatDate(b.top.date, 'short'))}${isNew ? ' · <em>Neu</em>' : ''}</small></span>
+            <span class="kg tnum">${esc(setText(b.e, b.top.s))}</span></button>`;
+        }).join('')}</div>
       </div>` : ''}
       <div class="card span2">
-        <div class="hero"><div><div class="eyebrow">Körpergewicht</div><div class="big">${bwAll.length ? esc(fmtNum(bwAll[0].kg, 1)) : '–'}<small>kg</small></div></div></div>
+        <div class="hero"><div><div class="eyebrow">Körpergewicht</div><div class="big">${bwAll.length ? esc(fmtNum(bwAll[0].kg, 1)) : '–'}<small>kg</small></div></div>
+          ${bwInRange.length > 1 ? (() => { const dk = bwInRange[0].kg - bwInRange[bwInRange.length - 1].kg; return `<div class="delta-pill neutral">${dk < 0 ? '↘' : dk > 0 ? '↗' : '→'} ${dk > 0 ? '+' : dk < 0 ? '−' : '±'}${fmtNum(Math.abs(dk), 1)} kg<small> im Zeitraum</small></div>`; })() : ''}</div>
         ${state.admin.viewAs ? '' : `<form class="bw-form" data-form="bodyweight">
           <input class="input tnum" type="date" name="date" value="${todayISO()}" max="${todayISO()}" aria-label="Datum">
           <input class="input tnum" name="kg" inputmode="decimal" placeholder="kg heute" aria-label="Körpergewicht in kg" required>
@@ -1634,29 +2107,53 @@ function renderSettings() {
   return `
     <div class="head"><div><h1 class="title">Mehr</h1></div></div>
 
+    ${profileCardHtml(profile)}
+
+    <div class="group-h">Training</div>
     <div class="card">
-      <h2>Konto</h2>
-      <form class="acc-form" data-form="account-name">
-        <label class="field">Name
-          <input class="input" name="name" value="${esc(profile.display_name || '')}" maxlength="60" autocomplete="nickname" placeholder="Vorname oder Spitzname">
-        </label>
-        <button class="btn btn-s" type="submit">Speichern</button>
-      </form>
-      <p class="small muted">Angemeldet als <b>${esc(profile.email || '–')}</b>${isAdmin() ? ' · Admin' : ''}</p>
-      <details class="acc-pw">
-        <summary>Passwort ändern</summary>
-        <form class="gate-actions" data-form="account-password" novalidate>
-          <label class="field">Neues Passwort (mind. ${MIN_PASSWORD} Zeichen)
-            <input class="input" name="password" type="password" autocomplete="new-password" minlength="${MIN_PASSWORD}" required>
-          </label>
-          <label class="field">Passwort wiederholen
-            <input class="input" name="password2" type="password" autocomplete="new-password" minlength="${MIN_PASSWORD}" required>
-          </label>
-          <button class="btn btn-s" type="submit">Passwort speichern</button>
-        </form>
-      </details>
-      <button class="btn btn-d" data-action="logout">Abmelden</button>
+      <div class="card-head"><h2>Wochenziel</h2><span class="small muted">Trainingstage pro Woche</span></div>
+      <div class="seg goal-seg" role="group" aria-label="Wochenziel">
+        ${[1, 2, 3, 4, 5, 6, 7].map((n) => `<button data-action="set-goal" data-goal="${n}" aria-pressed="${weekGoal() === n}">${n}</button>`).join('')}
+      </div>
+      <p class="small muted">Steuert den Ring und die Serie auf der Startseite. Gilt für dieses Gerät.</p>
     </div>
+
+    ${workoutNames().length ? `<div class="card">
+      <div class="card-head"><h2>Trainingsfarben</h2><span class="small muted">für Verlauf und Start</span></div>
+      <div class="nc-list">${workoutNames().map((n) => {
+        const cur = nameColor(n.name);
+        const key = n.name.toLowerCase();
+        // zu: nur die gewählte Farbe; offen: alle (Animation über data-anim, siehe animateColorPickers)
+        const anim = state.colorAnim && state.colorAnim.key === key ? state.colorAnim.dir : '';
+        const open = state.openColorName === key;
+        return `<div class="nc-row">
+          <span class="nc-name ${tagClass(n.name)}"><i class="tag-dot"></i>${esc(n.name)}</span>
+          <div class="nc-sw ${open && anim !== 'open' ? 'open' : ''} ${anim === 'close' ? 'open' : ''}" data-anim="${anim}" role="group" aria-label="Farbe für ${esc(n.name)}">${NAME_COLORS.map((c) =>
+            `<button class="tc-${c}" data-action="set-name-color" data-name="${esc(n.name)}" data-color="${c}" aria-pressed="${cur === c}" aria-label="${cur === c && !open ? `Farbe ändern (jetzt ${NAME_COLOR_LABELS[c]})` : NAME_COLOR_LABELS[c]}" title="${NAME_COLOR_LABELS[c]}" ${cur !== c && !open ? 'tabindex="-1"' : ''}></button>`).join('')}</div>
+        </div>`;
+      }).join('')}</div>
+    </div>` : ''}
+
+    ${exercisesCardHtml(exercises)}
+
+    <div class="group-h">Aussehen</div>
+    <div class="card">
+      <div class="card-head"><h2>Darstellung</h2>
+        <div class="seg" role="group" aria-label="Hell oder dunkel">
+          ${[['system', 'Auto'], ['light', 'Hell'], ['dark', 'Dunkel']].map(([k, l]) =>
+            `<button data-action="set-theme" data-theme="${k}" aria-pressed="${state.prefs.theme === k}">${l}</button>`).join('')}
+        </div>
+      </div>
+      <div class="swatches">${PALETTES.map(([k, n, d]) => `
+        <button class="sw" data-action="set-palette" data-palette="${k}" aria-pressed="${palette === k}" title="${esc(d)}">
+          <span class="sw-dot" data-palette="${k}"><i>${ICON_CHECK}</i></span><span>${esc(n)}</span>
+        </button>`).join('')}</div>
+    </div>
+
+    <div class="group-h">Hilfe</div>
+    ${feedbackCardHtml()}
+
+    <div class="group-h">Konto und Daten</div>
 
     ${isAdmin() ? `<div class="card">
       <div class="card-head"><h2>Admin</h2><span class="badge-soft">nur lesen</span></div>
@@ -1706,6 +2203,58 @@ function renderSettings() {
     </div>
 
     <div class="card">
+      <h2>Konto</h2>
+      <form class="acc-form" data-form="account-name">
+        <label class="field">Name
+          <input class="input" name="name" value="${esc(profile.display_name || '')}" maxlength="60" autocomplete="nickname" placeholder="Vorname oder Spitzname">
+        </label>
+        <button class="btn btn-s" type="submit">Speichern</button>
+      </form>
+      <p class="small muted">Angemeldet als <b>${esc(profile.email || '–')}</b>${isAdmin() ? ' · Admin' : ''}</p>
+      <details class="acc-pw">
+        <summary>Passwort ändern</summary>
+        <form class="gate-actions" data-form="account-password" novalidate>
+          <label class="field">Neues Passwort (mind. ${MIN_PASSWORD} Zeichen)
+            <input class="input" name="password" type="password" autocomplete="new-password" minlength="${MIN_PASSWORD}" required>
+          </label>
+          <label class="field">Passwort wiederholen
+            <input class="input" name="password2" type="password" autocomplete="new-password" minlength="${MIN_PASSWORD}" required>
+          </label>
+          <button class="btn btn-s" type="submit">Passwort speichern</button>
+        </form>
+      </details>
+      <button class="btn btn-d" data-action="logout">Abmelden</button>
+    </div>`;
+}
+
+/** V3.3: Feedback-Formular (Nachricht geht per Mail an den Betreiber). */
+const FEEDBACK_MAX = 2000;
+function feedbackCardHtml() {
+  if (state.feedbackSent) {
+    return `<div class="card fb-done">
+      <div class="fb-ok">${ICON_CHECK}</div>
+      <div><b>Danke für dein Feedback!</b><p class="small muted">Es ist angekommen. Ich lese jede Nachricht.</p></div>
+      <button class="btn btn-s btn-sm" data-action="feedback-again">Noch eins</button>
+    </div>`;
+  }
+  return `<div class="card">
+    <div class="card-head"><h2>Feedback</h2><span class="small muted">geht direkt per Mail an mich</span></div>
+    <form class="fb-form" data-form="feedback">
+      <div class="seg fb-kind" role="radiogroup" aria-label="Art">
+        ${[['idee', 'Idee'], ['fehler', 'Fehler'], ['lob', 'Lob'], ['sonst', 'Sonstiges']].map(([k, l], i) =>
+          `<label><input type="radio" name="kind" value="${k}" ${i === 0 ? 'checked' : ''}><span>${l}</span></label>`).join('')}
+      </div>
+      <textarea class="input fb-text" name="message" rows="4" maxlength="${FEEDBACK_MAX}" placeholder="Was gefällt dir, was fehlt, was klemmt?" aria-label="Deine Nachricht" required>${esc(state.feedbackDraft || '')}</textarea>
+      <div class="fb-foot"><span class="small muted">Deine E-Mail wird mitgeschickt, damit ich antworten kann.</span>
+        <button class="btn btn-p" type="submit">Senden</button></div>
+    </form>
+  </div>`;
+}
+
+/** V3.3: Karte «Übungen» (steht unter «Training»). */
+function exercisesCardHtml(exercises) {
+  return `
+    <div class="card">
       <h2>Übungen</h2>
       ${exercises.length ? (() => {
         if (!exercises.some((e) => e.id === state.settingsExId)) state.settingsExId = exercises[0].id;
@@ -1730,26 +2279,18 @@ function renderSettings() {
         </div>`;
       })()
       : '<p class="empty">Noch keine Übungen. Du legst sie beim Training an.</p>'}
-    </div>
+    </div>`;
+}
 
-    <div class="card">
-      <h2>Darstellung</h2>
-      <div class="seg" role="group" aria-label="Hell oder dunkel">
-        ${[['system', 'Auto'], ['light', 'Hell'], ['dark', 'Dunkel']].map(([k, l]) =>
-          `<button data-action="set-theme" data-theme="${k}" aria-pressed="${state.prefs.theme === k}">${l}</button>`).join('')}
-      </div>
-    </div>
-    <div class="eyebrow">Farbwelten</div>
-    <div class="tiles">${PALETTES.map(([k, n, d]) => `
-      <button class="tile" data-action="set-palette" data-palette="${k}" aria-pressed="${palette === k}">
-        <div class="tile-prev">
-          <div class="tile-set d"><em>1</em><span>62.5 kg</span><span>8 Wdh.</span><u></u></div>
-          <div class="tile-set o"><em>2</em><span>65 kg</span><span>8 Wdh.</span><u></u></div>
-          <svg class="tile-spark" viewBox="0 0 200 34" preserveAspectRatio="none" aria-hidden="true"><path d="M0 28L30 25L60 26L90 19L120 17L150 12L200 5V34H0Z" fill="var(--accent-soft)"/><path d="M0 28L30 25L60 26L90 19L120 17L150 12L200 5" fill="none" stroke="var(--accent)" stroke-width="2" vector-effect="non-scaling-stroke"/></svg>
-          <span class="tile-btn">Satz bestätigen</span>
-        </div>
-        <div class="tile-info"><b>${esc(n)}</b><span>${esc(d)}</span></div>
-      </button>`).join('')}</div>`;
+/** V3.3: Profilkarte oben in «Mehr» (nur Name, Zahlen stehen unter «Fortschritt»). */
+function profileCardHtml(profile) {
+  const name = (profile && profile.display_name) || (profile && profile.email ? firstWord(profile.email) : '') || 'Du';
+  const first = finishedWorkouts().map((w) => w.date).sort()[0];
+  return `
+    <section class="profile">
+      <div class="avatar">${esc(name.trim().charAt(0).toUpperCase() || '?')}</div>
+      <div class="pf-t"><b>${esc(name)}</b><span>${first ? `dabei seit ${esc(parseISODate(first).toLocaleDateString('de-CH', { month: 'long', year: 'numeric' }))}` : 'Noch kein Training'}</span></div>
+    </section>`;
 }
 
 /* --- Admin: alle Konten (nur lesen) --- */
@@ -1819,7 +2360,9 @@ function baseChartOptions(unit, width) {
   return {
     responsive: true,
     maintainAspectRatio: false,
-    animation: false,
+    // V3.3: nach einer Aktion (Ansicht/Übung/Zeitraum gewechselt) kurz einblenden, beim Sync nicht
+    animation: state.animateCharts && !window.matchMedia('(prefers-reduced-motion: reduce)').matches
+      ? { duration: 750, easing: 'easeOutQuart' } : false,
     layout: { padding: { top: 22, right: 10 } },
     interaction: { mode: 'nearest', axis: 'x', intersect: false },
     plugins: {
@@ -2142,6 +2685,7 @@ function startRest(sec, label) {
   rest.end = Date.now() + sec * 1000;
   rest.total = sec;
   rest.label = label;
+  rest.buzzed = false;
   $('#rest').hidden = false;
   tick();
 }
@@ -2162,6 +2706,10 @@ function tick() {
   const box = $('#rest');
   if (!box || box.hidden) return;
   const left = Math.max(0, Math.ceil((rest.end - Date.now()) / 1000));
+  // V3.3: letzte 5 Sekunden pulsieren, bei 0 kurz vibrieren (falls das Handy es kann)
+  box.classList.toggle('ending', left > 0 && left <= 5);
+  box.classList.toggle('ready', left === 0);
+  if (left === 0 && !rest.buzzed) { rest.buzzed = true; try { navigator.vibrate && navigator.vibrate([120, 80, 120]); } catch { /* egal */ } }
   $('#restTime').textContent = `${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`;
   $('#restLabel').textContent = left ? `Pause nach ${rest.label}` : 'Bereit für den nächsten Satz';
   $('#restBar').style.width = (rest.total ? (left / rest.total) * 100 : 0) + '%';
@@ -2239,6 +2787,7 @@ function finishWorkout() {
   state.meta.activeWorkoutId = null;
   state.meta.doneSets = {};
   state.focus = null;
+  state.view = 'home';
   hideRest();
   if (w && w.entries.length === 0) {
     // Leere Trainings nicht aufbewahren
@@ -2335,14 +2884,24 @@ const moreActions = {
       pr = isPR(ex, set, true, bestScores(w.id));
       if (pr) toast(`Neuer Rekord: ${ex.name} ${setText(ex, set)}`);
       if (ex.type !== 'distance') startRest(restSecondsFor(ex), `Satz ${i + 1}`);
+      // V3.3: letzte Übung fertig → zuklappen (falls vorher von Hand aufgeklappt)
+      if (entry.sets.every((s, j) => isDone(w, entry, j)) && state.openEntries) state.openEntries.delete(entry.id);
     }
     render();
     if (done) {
       const sel = `[data-entry="${CSS.escape(entry.id)}"][data-set="${i}"]`;
-      $(`.set${sel}`)?.classList.add('just-done');
+      $(`.set${sel}`)?.classList.add(pr ? 'just-pr' : 'just-done');
       $(`.check${sel}`)?.classList.add('just-done');
-      if (pr) $(`.entry[data-entry="${CSS.escape(entry.id)}"] .ex-h .badge`)?.classList.add('just-pr');
+      const card = $(`.entry[data-entry="${CSS.escape(entry.id)}"]`);
+      if (card && card.classList.contains('collapsed')) card.classList.add('just-collapsed');
+      if (pr) card?.querySelector('.badge')?.classList.add('just-pr');
     }
+  },
+  'toggle-entry': (el) => {
+    const id = el.dataset.entry;
+    if (!state.openEntries) state.openEntries = new Set();
+    if (state.openEntries.has(id)) state.openEntries.delete(id); else state.openEntries.add(id);
+    render();
   },
   'rest-add': (el) => {
     rest.end = Math.max(Date.now(), rest.end) + Number(el.dataset.sec) * 1000;
@@ -2350,10 +2909,44 @@ const moreActions = {
     tick();
   },
   'rest-skip': () => hideRest(),
-  'summary-close': () => { state.summary = null; render(); },
+  'summary-close': () => { state.summary = null; setView('home'); },
 
   'stats-ex': (el) => {
     state.statsExerciseId = el.dataset.id;
+    state.animateCharts = true;
+    render();
+  },
+  // V3.3: von der Startseite (letzter Rekord) direkt zur Übung im Fortschritt
+  'goto-ex': (el) => {
+    state.statsExerciseId = el.dataset.id;
+    setView('stats');
+  },
+  'feedback-again': () => { state.feedbackSent = false; render(); },
+  'hist-filter': (el) => {
+    state.histFilter = el.dataset.name || '';
+    render();
+  },
+  // Zu → antippen öffnet alle Farben. Offen → Farbe wählen und wieder schliessen.
+  'set-name-color': (el) => {
+    const key = String(el.dataset.name).toLowerCase();
+    if (state.openColorName !== key) {
+      state.openColorName = key;
+      state.colorAnim = { key, dir: 'open' };
+      render();
+      return;
+    }
+    if (nameColor(el.dataset.name) !== el.dataset.color) {
+      if (!state.data.nameColors) state.data.nameColors = {};
+      state.data.nameColors[key] = el.dataset.color;
+      commit();
+    }
+    state.openColorName = null;
+    state.colorAnim = { key, dir: 'close' };
+    render();
+  },
+  'set-goal': (el) => {
+    state.prefs.weekGoal = Number(el.dataset.goal) || 3;
+    savePrefs();
     render();
   },
   'set-palette': (el) => {
@@ -2366,6 +2959,7 @@ const moreActions = {
   'set-range': (el) => {
     state.prefs.range = el.dataset.range;
     savePrefs();
+    state.animateCharts = true;
     render();
   },
 
@@ -2507,11 +3101,35 @@ function workoutSummary(w) {
   }
   const started = Date.parse(w.createdAt || '');
   const mins = Math.round((Date.now() - started) / 60000);
+
+  // V3.3: Vergleich mit dem letzten Training gleichen Namens + Wochenziel vorher/nachher
+  const prev = w.name ? sortedWorkouts().find((x) => x.id !== w.id && x.name.toLowerCase() === w.name.toLowerCase()
+    && x.entries.some((e) => validSets(e).length)) : null;
+  let prevVol = 0, prevSets = 0;
+  if (prev) prev.entries.forEach((en) => validSets(en).forEach((s) => { prevSets++; prevVol += (s.weight || 0) * s.reps; }));
+  const mon = mondayISO(0), sun = plusDaysISO(mon, 6);
+  const daysBefore = trainedDays(mon, sun); // das laufende Training ist hier noch nicht dabei
+  const weekBefore = daysBefore.size;
+  const weekAfter = sets && w.date >= mon && w.date <= sun && !daysBefore.has(w.date) ? weekBefore + 1 : weekBefore;
+  // Übungen, die besser waren als beim letzten Mal (bester Satz, nach Kraftwert)
+  let improved = 0, compared = 0;
+  for (const en of w.entries) {
+    const ex = getExercise(en.exerciseId);
+    if (!ex || ex.type === 'distance') continue;
+    const t = topSetOf(ex, en), prevEn = prevEntryBefore(ex.id, w), pt = prevEn && topSetOf(ex, prevEn);
+    if (!t || !pt) continue;
+    compared++;
+    if (scoreOf(ex, t) > scoreOf(ex, pt)) improved++;
+  }
+
   return {
     name: w.name || '',
     names: w.entries.map((e) => (getExercise(e.exerciseId) || {}).name).filter(Boolean).join(', '),
     min: w.date === todayISO() && Number.isFinite(mins) && mins >= 0 && mins < 12 * 60 ? mins : null,
     vol, sets, prs,
+    prev: prev ? { date: prev.date, vol: prevVol, sets: prevSets } : null,
+    weekBefore, weekAfter, improved, compared,
+    fresh: true, // Konfetti + Hochzählen nur beim ersten Anzeigen
   };
 }
 
@@ -2662,6 +3280,32 @@ const forms = {
   },
 
   /* Konto */
+  // V3.3: Feedback → Supabase Edge Function «send-feedback» (speichert + schickt Mail über Brevo)
+  feedback: async (form) => {
+    const message = form.message.value.trim().slice(0, FEEDBACK_MAX);
+    const kind = form.kind.value;
+    if (message.length < 3) { toast('Schreib kurz, worum es geht'); return; }
+    if (!state.auth.client || !state.sync.configured) { toast('Offline: Feedback geht erst mit Internet'); return; }
+    const btn = form.querySelector('button[type="submit"]');
+    btn.disabled = true; btn.textContent = 'Wird gesendet …';
+    try {
+      const { data, error } = await state.auth.client.functions.invoke('send-feedback', {
+        body: { message, kind, app: IS_TEST ? 'test' : 'live', version: 'v3.3', page: location.pathname, agent: navigator.userAgent.slice(0, 200) },
+      });
+      if (error) throw error;
+      if (data && data.error) throw new Error(data.error);
+      state.feedbackSent = true;
+      state.feedbackDraft = '';
+      render();
+      toast('Danke! Feedback ist angekommen');
+    } catch (err) {
+      console.warn(err);
+      btn.disabled = false; btn.textContent = 'Senden';
+      const status = err && err.context && err.context.status;
+      toast(status === 429 ? 'Zu viel auf einmal, versuch es später nochmals' : 'Hat nicht geklappt, versuch es später nochmals');
+    }
+  },
+
   'account-name': async (form) => {
     const name = form.name.value.trim().slice(0, 60);
     try {
@@ -2794,6 +3438,7 @@ function bindEvents() {
   });
 
   document.addEventListener('input', (e) => {
+    if (e.target.classList && e.target.classList.contains('fb-text')) { state.feedbackDraft = e.target.value; return; }
     if (state.admin.viewAs) return;
     if (e.target.dataset && e.target.dataset.field) onFieldInput(e.target);
   });
@@ -2872,7 +3517,7 @@ function startApp(user, { offline = false } = {}) {
   if (user.email && !state.meta.profile) state.meta.profile = { email: user.email, display_name: '', is_admin: false };
   if (state.meta.activeWorkoutId && !getWorkout(state.meta.activeWorkoutId)) state.meta.activeWorkoutId = null;
   state.admin = { users: null, inviteCode: null, viewAs: null, ownData: null };
-  state.view = 'training';
+  state.view = state.meta.activeWorkoutId ? 'training' : 'home';
   state.summary = null;
   state.focus = null;
   document.body.classList.remove('read-only');
