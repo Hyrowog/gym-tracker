@@ -120,6 +120,11 @@
   .tile:hover { border-color: var(--text-3); }
   .tile[aria-pressed="true"]:hover { border-color: var(--accent); }
 
+  /* ---------- V3.3 Startseite: Hauptkarte links, Ziel + Kacheln rechts ---------- */
+  .today-grid { display: grid; grid-template-columns: 1.25fr 1fr; align-items: stretch; }
+  .next { padding: 24px; }
+  .next-name { font-size: 64px; }
+
   /* ---------- Pausen-Timer: unten rechts in der Inhaltsspalte ---------- */
   .rest {
     left: auto; width: 400px;

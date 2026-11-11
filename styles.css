@@ -473,3 +473,85 @@ body.read-only .sync-pill { visibility: hidden; }
 
 /* Mehr → Übungen: Auswahl per Dropdown */
 .ex-row:first-of-type { border-top: 0; padding-top: 0; }
+
+/* =====================================================================
+   V3.3: Startseite «Heute»
+   Eine laute Karte in Akzentfarbe, der Rest bleibt ruhig.
+   Nur Farb-Variablen von oben → alle Farbwelten + Hell/Dunkel.
+   ===================================================================== */
+.today-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+@media (max-width: 899.98px) { .today-head { padding-right: 34px; } } /* Platz für den Sync-Punkt */
+.today-head .sub { margin: 0 0 4px; }
+.today-head .title { font-size: 36px; line-height: 1.02; }
+.hl { color: var(--accent); }
+.streak { display: inline-flex; align-items: center; gap: 5px; padding: 6px 11px 6px 8px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); font-size: 13px; font-weight: 600; white-space: nowrap; margin-top: 4px; }
+.streak b { font-weight: 800; font-size: 15px; }
+.streak svg { width: 17px; height: 17px; fill: currentColor; animation: flicker 2.4s ease-in-out infinite; transform-origin: 50% 90%; }
+@keyframes flicker { 0%, 100% { transform: scale(1) rotate(0); } 30% { transform: scale(1.08, .95) rotate(-3deg); } 60% { transform: scale(.96, 1.06) rotate(2deg); } }
+
+.today-grid, .today-side { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+
+/* Hauptkarte: nächstes Training */
+.next { display: flex; flex-direction: column; gap: 12px; padding: 18px 18px 16px; border-radius: 22px; color: var(--accent-ink);
+  background: radial-gradient(circle at calc(100% + 30px) -40px, color-mix(in srgb, var(--accent-ink) 8%, var(--accent)) 0 130px, transparent 131px), var(--accent); }
+.next-top { display: flex; justify-content: space-between; gap: 10px; font-size: 12.5px; }
+.next-top .eyebrow { color: inherit; opacity: .75; }
+.next-top span:last-child { opacity: .75; }
+.next-name { font-size: 46px; line-height: .95; font-weight: 750; font-stretch: 72%; letter-spacing: -.01em; overflow-wrap: anywhere; }
+.next-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.next-stats div { display: flex; flex-direction: column; padding: 8px 10px; border-radius: 12px; background: color-mix(in srgb, var(--accent-ink) 9%, transparent); }
+.next-stats b { font-size: 22px; line-height: 1.1; font-weight: 700; font-stretch: 80%; }
+.next-stats span { font-size: 12px; opacity: .8; }
+.next-goal { display: flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 550; }
+.next-goal svg { width: 18px; height: 18px; flex: none; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+.next-go { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 52px; border: 0; border-radius: 14px; background: var(--accent-ink); color: var(--accent); font-size: 16px; font-weight: 700; transition: transform .12s ease; }
+.next-go:active { transform: scale(.97); }
+.next-go svg { width: 18px; height: 18px; fill: currentColor; }
+
+/* Wochenziel-Ring */
+.goal { flex-direction: row; align-items: center; gap: 16px; cursor: pointer; }
+.ring { width: 84px; height: 84px; flex: none; }
+.ring circle { fill: none; stroke-width: 8; }
+.ring-bg { stroke: var(--surface-2); }
+.ring-fg { stroke: var(--accent); stroke-linecap: round; transform: rotate(-90deg); transform-origin: 50% 50%; stroke-dasharray: var(--c); stroke-dashoffset: var(--off); }
+.main.enter .ring-fg { animation: ring-fill 1s cubic-bezier(.3, .9, .3, 1) .15s both; }
+@keyframes ring-fill { from { stroke-dashoffset: var(--c); } }
+.ring-v { fill: var(--text); font: 700 20px var(--font); font-stretch: 80%; text-anchor: middle; dominant-baseline: middle; }
+.ring-l { fill: var(--text-3); font: 600 10px var(--font); text-anchor: middle; letter-spacing: .06em; text-transform: uppercase; }
+.goal-txt { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.goal-txt b { font-size: 17px; font-weight: 650; }
+.goal-txt > span { font-size: 13px; color: var(--text-2); margin-bottom: 8px; }
+.dots, .dots-l { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; max-width: 230px; }
+.dots i { width: 14px; height: 14px; justify-self: center; border-radius: 50%; background: var(--surface-2); }
+.dots i.on { background: var(--accent); }
+.dots i.now { box-shadow: inset 0 0 0 2px var(--accent); animation: pulse 1.6s ease-in-out infinite; }
+.dots i.on.now { animation: none; box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--accent); }
+.dots-l span { font-size: 10.5px; color: var(--text-3); text-align: center; }
+
+/* Zwei kleine Kacheln */
+.minis { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.mini { gap: 2px; padding: 12px 14px; text-align: left; color: var(--text); }
+.mini-v { font-size: 28px; line-height: 1.1; font-weight: 700; font-stretch: 78%; }
+.mini-v small { font-size: 15px; font-weight: 600; color: var(--text-2); }
+.mini-d { font-size: 12px; color: var(--text-3); }
+.mini-d.up { color: var(--done); font-weight: 600; }
+.mini-n { font-size: 13.5px; font-weight: 600; color: var(--text-2); }
+.mini-pr { border-color: color-mix(in srgb, var(--pr) 45%, var(--line)); background: color-mix(in srgb, var(--pr) 7%, var(--surface)); }
+.mini-pr .eyebrow, .mini-pr .mini-v { color: var(--pr); }
+.mini-pr .mini-v small { color: inherit; opacity: .75; }
+.spark { display: block; width: 100%; height: 24px; margin: 2px 0; }
+.spark polyline { fill: none; stroke: var(--accent); stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+.main.enter .spark polyline { stroke-dasharray: 1; animation: draw 1s ease-out .3s both; }
+@keyframes draw { from { stroke-dashoffset: 1; } to { stroke-dashoffset: 0; } }
+
+/* Übrige Trainings als Chips */
+.chip-name small { font-weight: 450; color: var(--text-3); margin-left: 4px; font-size: 12.5px; }
+.chip-empty { border-style: dashed; color: var(--text-2); }
+
+/* Mehr → Wochenziel */
+.goal-seg { display: grid; grid-template-columns: repeat(7, 1fr); }
+.goal-seg button { padding: 0; font-variant-numeric: tabular-nums; }
+
+@media (prefers-reduced-motion: reduce) {
+  .streak svg, .dots i.now { animation: none !important; }
+}

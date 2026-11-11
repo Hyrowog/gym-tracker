@@ -1224,29 +1224,221 @@ function renderTraining() {
   if (active) return renderWorkoutEditor(active);
   if (state.summary) return renderSummary();
 
-  const last = lastWorkoutNamed('');
-  const recent = sortedWorkouts().filter((w) => w.entries.length).slice(0, 3);
-  // Wiederholen: pro Trainingsname eine Zeile; dazu das letzte Training, falls es keinen Namen hat
-  const repeat = workoutNames().map((n) => lastWorkoutNamed(n.name)).filter(Boolean).slice(0, 6);
-  if (last && !last.name) repeat.unshift(last);
+  return renderToday();
+}
+
+/* ---------------------------------------------------------------------
+   V3.3: Startseite «Heute»
+   Eine laute Karte (nächstes Training), darunter Wochenziel, Volumen,
+   letzter Rekord und die übrigen Trainings als Chips. Nur Anzeige,
+   ändert keine Daten. Das Wochenziel liegt in state.prefs.weekGoal.
+   --------------------------------------------------------------------- */
+const ICON_PLAY = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>';
+const ICON_TREND = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 17l6-6 4 4 6-7M15 8h5v5"/></svg>';
+const ICON_FLAME = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3c1 3.5 5 5.5 5 10a5 5 0 0 1-10 0c0-2 1-3.5 2-4.5 0 2 1 3 2 3 0-3-1-5.5 1-8.5z"/></svg>';
+
+function weekGoal() { const g = Number(state.prefs.weekGoal); return g >= 1 && g <= 7 ? g : 3; }
+
+/** Montag der Woche (offset 0 = diese Woche, -1 = letzte Woche …) als ISO-Datum. */
+function mondayISO(offsetWeeks = 0) {
+  const now = parseISODate(todayISO());
+  return toISODate(addDays(now, -((now.getDay() + 6) % 7) + 7 * offsetWeeks));
+}
+function plusDaysISO(iso, n) { return toISODate(addDays(parseISODate(iso), n)); }
+
+/** Abgeschlossene Trainings (mit mindestens einem gültigen Satz), ohne das laufende. */
+function finishedWorkouts() {
+  return state.data.workouts.filter((w) => w.id !== state.meta.activeWorkoutId && w.entries.some((e) => validSets(e).length));
+}
+function trainedDays(from, to) {
+  return new Set(finishedWorkouts().filter((w) => w.date >= from && w.date <= to).map((w) => w.date));
+}
+function weekDayCount(offset) { const mon = mondayISO(offset); return trainedDays(mon, plusDaysISO(mon, 6)).size; }
+
+/** Serie: Wochen in Folge mit erreichtem Wochenziel (diese Woche zählt mit, sobald erreicht). */
+function goalStreak() {
+  const g = weekGoal();
+  let s = 0;
+  for (let k = -1; k > -520 && weekDayCount(k) >= g; k--) s++;
+  if (weekDayCount(0) >= g) s++;
+  return s;
+}
+
+/** Volumen (kg × Wdh., nur Übungen vom Typ Gewicht) zwischen zwei Daten. */
+function volumeBetween(from, to) {
+  let v = 0;
+  for (const w of finishedWorkouts()) {
+    if (w.date < from || w.date > to) continue;
+    for (const en of w.entries) {
+      const ex = getExercise(en.exerciseId);
+      if (!ex || ex.type !== 'weight') continue;
+      for (const s of validSets(en)) v += (s.weight || 0) * s.reps;
+    }
+  }
+  return v;
+}
+
+/**
+ * Vorschlag fürs nächste Training: von den Trainingsnamen der letzten 6 Wochen
+ * der, der am längsten her ist (bei Push/Pull/Beine ergibt das die Reihenfolge).
+ * Sonst einfach das letzte Training.
+ */
+function nextWorkout() {
+  const since = plusDaysISO(todayISO(), -42);
+  const recent = workoutNames().map((n) => lastWorkoutNamed(n.name))
+    .filter((w) => w && w.date >= since && w.id !== state.meta.activeWorkoutId);
+  if (recent.length) return [...recent].sort((a, b) => a.date.localeCompare(b.date))[0];
+  return lastWorkoutNamed('');
+}
+
+/** Kleine Herausforderung aus der ersten Übung: «letztes Mal 60 × 8. Heute 9 Wdh.?» */
+function challengeFor(w) {
+  for (const en of w.entries) {
+    const ex = getExercise(en.exerciseId);
+    if (!ex || ex.type === 'distance') continue;
+    const vs = validSets(en);
+    if (!vs.length) continue;
+    const top = vs.reduce((a, s) => (scoreOf(ex, s) > scoreOf(ex, a) ? s : a));
+    return `${ex.name}: letztes Mal ${setText(ex, top)}. Heute ${top.reps + 1} Wdh.?`;
+  }
+  return '';
+}
+
+/** Letzter Rekord (chronologisch wie im Verlauf gezählt): { w, ex, s } oder null. */
+function lastRecord() {
+  const best = {};
+  let last = null;
+  [...finishedWorkouts()].sort((a, b) => a.date.localeCompare(b.date) || String(a.createdAt || '').localeCompare(String(b.createdAt || '')))
+    .forEach((w) => {
+      for (const en of w.entries) {
+        const ex = getExercise(en.exerciseId);
+        const vs = validSets(en);
+        if (!ex || !vs.length) continue;
+        const top = vs.reduce((a, s) => (scoreOf(ex, s) > scoreOf(ex, a) ? s : a));
+        const sc = scoreOf(ex, top);
+        if (best[ex.id] !== undefined && sc > best[ex.id]) last = { w, ex, s: top };
+        best[ex.id] = Math.max(best[ex.id] ?? 0, sc);
+      }
+    });
+  return last;
+}
+
+function tonsHtml(kg) { return kg >= 1000 ? `${fmtNum(kg / 1000, 1)}<small> t</small>` : `${thousand(kg)}<small> kg</small>`; }
+
+function sparkHtml(vals) {
+  if (vals.length < 2 || !vals.some((v) => v > 0)) return '';
+  const max = Math.max(...vals), min = Math.min(...vals);
+  const pts = vals.map((v, i) => `${((i / (vals.length - 1)) * 100).toFixed(1)},${(22 - ((v - min) / (max - min || 1)) * 19).toFixed(1)}`).join(' ');
+  return `<svg class="spark" viewBox="0 0 100 24" preserveAspectRatio="none" aria-hidden="true"><polyline pathLength="1" points="${pts}"/></svg>`;
+}
+
+function ringHtml(frac, big, small) {
+  const C = 2 * Math.PI * 32;
+  const off = C * (1 - Math.max(0, Math.min(1, frac)));
+  return `<svg class="ring" viewBox="0 0 80 80" role="img" aria-label="${esc(big)} ${esc(small)}">
+    <circle class="ring-bg" cx="40" cy="40" r="32"/>
+    <circle class="ring-fg" cx="40" cy="40" r="32" style="--c:${C.toFixed(1)};--off:${off.toFixed(1)}"/>
+    <text x="40" y="40" class="ring-v">${esc(big)}</text><text x="40" y="54" class="ring-l">${esc(small)}</text></svg>`;
+}
+
+function weekDotsHtml() {
+  const mon = mondayISO(0);
+  const days = trainedDays(mon, plusDaysISO(mon, 6));
+  const today = todayISO();
+  const L = ['Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So'];
+  return `<div class="dots">${L.map((l, i) => { const d = plusDaysISO(mon, i); return `<i class="${days.has(d) ? 'on' : ''} ${d === today ? 'now' : ''}" title="${l}"></i>`; }).join('')}</div>
+    <div class="dots-l">${L.map((l) => `<span>${l}</span>`).join('')}</div>`;
+}
+
+function renderToday() {
+  const today = todayISO();
+  const goal = weekGoal();
+  const wc = weekDayCount(0);
+  const left = Math.max(0, goal - wc);
+  const streak = goalStreak();
+  const next = nextWorkout();
+  const hello = myName() ? `Hey ${esc(firstWord(myName()))},` : 'Hey,';
+
+  // übrige Trainings als Chips (pro Name das letzte), ohne das vorgeschlagene
+  const others = workoutNames().map((n) => lastWorkoutNamed(n.name)).filter((w) => w && (!next || w.id !== next.id)).slice(0, 6);
+  const lastAny = lastWorkoutNamed('');
+  if (lastAny && !lastAny.name && (!next || lastAny.id !== next.id)) others.unshift(lastAny);
+
+  // Volumen: diese Woche bis heute vs. Vorwoche bis zum gleichen Wochentag
+  const mon = mondayISO(0);
+  const vNow = volumeBetween(mon, today);
+  const vPrev = volumeBetween(mondayISO(-1), plusDaysISO(today, -7));
+  const vPct = vPrev ? Math.round(((vNow - vPrev) / vPrev) * 100) : null;
+  const vols = Array.from({ length: 8 }, (_, i) => { const m = mondayISO(i - 7); return volumeBetween(m, plusDaysISO(m, 6)); });
+  const weekday = parseISODate(today).toLocaleDateString('de-CH', { weekday: 'short' }).replace('.', '');
+  const rec = lastRecord();
+
+  const nextSets = next ? next.entries.reduce((a, en) => a + validSets(en).length, 0) : 0;
+  const nextEx = next ? next.entries.filter((en) => validSets(en).length).length : 0;
+  const challenge = next ? challengeFor(next) : '';
+
+  const hero = next ? `
+      <section class="next">
+        <div class="next-top"><span class="eyebrow">Als Nächstes</span><span>zuletzt ${esc(relativeDay(next.date).replace(/^(Heute|Gestern)$/, (m) => m.toLowerCase()))}</span></div>
+        <h2 class="next-name">${next.name ? esc(next.name) : 'Letztes Training'}</h2>
+        <div class="next-stats">
+          <div><b class="tnum">${nextEx}</b><span>${nextEx === 1 ? 'Übung' : 'Übungen'}</span></div>
+          <div><b class="tnum">${nextSets}</b><span>Sätze</span></div>
+          <div><b class="tnum">${next.durationMin ? `${next.durationMin}′` : '–'}</b><span>Dauer</span></div>
+        </div>
+        ${challenge ? `<p class="next-goal">${ICON_TREND}${esc(challenge)}</p>` : ''}
+        <button class="next-go" data-action="start-repeat" data-id="${esc(next.id)}">${ICON_PLAY}Training starten</button>
+      </section>` : `
+      <section class="next">
+        <div class="next-top"><span class="eyebrow">Los geht's</span></div>
+        <h2 class="next-name">Erstes Training</h2>
+        <p class="next-goal">Trag deine Sätze direkt nach dem Satz ein. Danach siehst du hier, was als Nächstes dran ist.</p>
+        <button class="next-go" data-action="start-empty">${ICON_PLAY}Training starten</button>
+      </section>`;
 
   return `
-    <div class="head"><div><h1 class="title">Training</h1><p class="sub">${myName() ? `Hallo ${esc(firstWord(myName()))}, ` : ''}${esc(formatDate(todayISO()))}</p></div></div>
-    ${v1NoticeHtml()}
-    <div class="start card">
-      ${repeat.length ? `<div class="start-h">Wiederholen</div>
-        <div class="start-list">${repeat.map((w, i) => `
-          <button class="start-row ${i === 0 ? 'first' : ''}" data-action="start-repeat" data-id="${esc(w.id)}" style="--i:${i}">
-            <span class="start-name">${w.name ? esc(w.name) : 'Letztes Training'}</span>
-            <span class="start-when">${esc(relativeDay(w.date))}</span>
-            <i class="chev">${ICON_CHEVRON}</i>
-          </button>`).join('')}</div>` : ''}
-      <button class="btn ${repeat.length ? 'btn-s' : 'btn-p'} block start-empty" data-action="start-empty">${ICON_PLUS}<span>Leeres Training</span></button>
+    <div class="today-head">
+      <div>
+        <p class="sub">${esc(parseISODate(today).toLocaleDateString('de-CH', { weekday: 'long', day: 'numeric', month: 'long' }))}</p>
+        <h1 class="title">${hello}<br>${next && next.name ? `Zeit für <span class="hl">${esc(next.name)}</span>` : 'Zeit fürs Training'}</h1>
+      </div>
+      ${streak ? `<span class="streak" title="${streak} ${streak === 1 ? 'Woche' : 'Wochen'} in Folge Wochenziel erreicht">${ICON_FLAME}<b class="tnum">${streak}</b> ${streak === 1 ? 'Woche' : 'Wochen'}</span>` : ''}
     </div>
-    <div class="card"><div class="eyebrow">Diese Woche</div>${weekStrip()}</div>
-    ${recent.length ? `
-      <div class="eyebrow">Zuletzt</div>
-      <div class="card log">${recent.map((w) => logRow(w, 0)).join('')}</div>` : ''}`;
+    ${v1NoticeHtml()}
+    <div class="today-grid">
+      ${hero}
+      <div class="today-side">
+        <section class="card goal" data-action="nav" data-view="settings" title="Wochenziel unter «Mehr» ändern">
+          ${ringHtml(wc / goal, `${wc}/${goal}`, 'Ziel')}
+          <div class="goal-txt">
+            <b>Wochenziel</b>
+            <span>${left ? `Noch ${left} ${left === 1 ? 'Training' : 'Trainings'} bis Sonntag` : 'Geschafft! Alles weitere ist Bonus.'}</span>
+            ${weekDotsHtml()}
+          </div>
+        </section>
+        ${next ? `<div class="minis">
+          <section class="card mini">
+            <span class="eyebrow">Volumen Woche</span>
+            <b class="mini-v tnum">${tonsHtml(vNow)}</b>
+            ${sparkHtml(vols)}
+            <span class="mini-d ${vPct !== null && vPct >= 0 ? 'up' : ''}">${vPct === null ? 'Letzte 8 Wochen' : `${vPct >= 0 ? '+' : '−'}${Math.abs(vPct)} % zur Vorwoche (bis ${esc(weekday)})`}</span>
+          </section>
+          ${rec ? `<button class="card mini mini-pr" data-action="goto-ex" data-id="${esc(rec.ex.id)}">
+            <span class="eyebrow">Letzter Rekord</span>
+            <b class="mini-v tnum">${rec.ex.type === 'bodyweight' ? `${rec.s.reps}<small> Wdh.</small>` : rec.ex.type === 'distance' ? `${fmtNum(rec.s.weight)}<small> km</small>` : `${fmtNum(rec.s.weight)}<small> kg</small>`}</b>
+            <span class="mini-n">${esc(rec.ex.name)}${rec.ex.type === 'weight' ? ` · ${rec.s.reps} Wdh.` : ''}</span>
+            <span class="mini-d">${esc(relativeDay(rec.w.date))}</span>
+          </button>` : `<section class="card mini"><span class="eyebrow">Rekorde</span><span class="mini-n">Sobald du ein Gewicht schlägst, erscheint es hier.</span></section>`}
+        </div>` : ''}
+      </div>
+    </div>
+    <div>
+      ${others.length ? '<div class="eyebrow" style="margin:0 2px 8px">Oder lieber</div>' : ''}
+      <div class="chips">
+        ${others.map((w) => `<button class="chip chip-name" data-action="start-repeat" data-id="${esc(w.id)}">${w.name ? esc(w.name) : 'Letztes Training'} <small>${esc(relativeDay(w.date))}</small></button>`).join('')}
+        <button class="chip chip-name chip-empty" data-action="start-empty">+ Leeres Training</button>
+      </div>
+    </div>`;
 }
 
 function weekStrip() {
@@ -1730,6 +1922,14 @@ function renderSettings() {
         </div>`;
       })()
       : '<p class="empty">Noch keine Übungen. Du legst sie beim Training an.</p>'}
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h2>Wochenziel</h2><span class="small muted">Trainingstage pro Woche</span></div>
+      <div class="seg goal-seg" role="group" aria-label="Wochenziel">
+        ${[1, 2, 3, 4, 5, 6, 7].map((n) => `<button data-action="set-goal" data-goal="${n}" aria-pressed="${weekGoal() === n}">${n}</button>`).join('')}
+      </div>
+      <p class="small muted">Steuert den Ring und die Serie auf der Startseite. Gilt für dieses Gerät.</p>
     </div>
 
     <div class="card">
@@ -2354,6 +2554,16 @@ const moreActions = {
 
   'stats-ex': (el) => {
     state.statsExerciseId = el.dataset.id;
+    render();
+  },
+  // V3.3: von der Startseite (letzter Rekord) direkt zur Übung im Fortschritt
+  'goto-ex': (el) => {
+    state.statsExerciseId = el.dataset.id;
+    setView('stats');
+  },
+  'set-goal': (el) => {
+    state.prefs.weekGoal = Number(el.dataset.goal) || 3;
+    savePrefs();
     render();
   },
   'set-palette': (el) => {
