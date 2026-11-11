@@ -501,6 +501,7 @@ function startWorkout(mode, sourceId = null) {
   state.focus = null;
   state.summary = null;
   state.naming = false;
+  state.view = 'training';
   commit();
   render();
   playEnter();
@@ -1031,7 +1032,7 @@ async function loadProfile() {
     if (data) {
       state.meta.profile = { email: data.email || '', display_name: data.display_name || '', is_admin: !!data.is_admin };
       saveCache();
-      if (!state.admin.viewAs && (state.view === 'settings' || state.view === 'training')) render();
+      if (!state.admin.viewAs && (state.view === 'settings' || state.view === 'training' || state.view === 'home')) render();
     }
   } catch (err) {
     console.warn('Profil nicht geladen', err);
@@ -1152,20 +1153,26 @@ function v1NoticeHtml() {
    --------------------------------------------------------------------- */
 function render() {
   destroyCharts();
-  document.body.dataset.view = state.view;
-  document.querySelectorAll('.nav button').forEach((t) => {
-    if (t.dataset.view === state.view || (state.view === 'admin' && t.dataset.view === 'settings')) t.setAttribute('aria-current', 'page');
-    else t.removeAttribute('aria-current');
-  });
   const view = $('#view');
   if (state.admin.viewAs && !['history', 'stats'].includes(state.view)) state.view = 'history';
+  // V3.3: «training» gibt es nur, solange ein Training läuft; sonst Startseite
+  if (state.view === 'training' && !activeWorkout()) state.view = 'home';
   let html;
   if (state.view === 'history') html = renderHistory();
   else if (state.view === 'stats') html = renderStats();
   else if (state.view === 'settings') html = renderSettings();
   else if (state.view === 'admin') html = renderAdmin();
-  else html = renderTraining();
+  else if (state.view === 'training') html = renderTraining();
+  else { state.view = 'home'; html = renderHome(); }
   view.innerHTML = testBannerHtml() + viewAsBannerHtml() + html;
+
+  document.body.dataset.view = state.view;
+  document.querySelectorAll('.nav button').forEach((t) => {
+    if (t.dataset.view === 'training') t.hidden = !activeWorkout(); // Tab «Aktuelles Training» nur während eines Trainings
+    if (t.dataset.view === state.view || (state.view === 'admin' && t.dataset.view === 'settings')) t.setAttribute('aria-current', 'page');
+    else t.removeAttribute('aria-current');
+  });
+  document.body.classList.toggle('has-live', !!activeWorkout());
 
   if (state.view === 'stats') drawStats();
   if (!activeWorkout()) hideRest();
@@ -1272,8 +1279,13 @@ function renderTraining() {
   const active = state.meta.activeWorkoutId && getWorkout(state.meta.activeWorkoutId);
   if (active && state.naming) return renderNaming(active);
   if (active) return renderWorkoutEditor(active);
-  if (state.summary) return renderSummary();
+  state.view = 'home';
+  return renderHome();
+}
 
+/** V3.3: Startseite (nach «Fertig» zuerst die Zusammenfassung). */
+function renderHome() {
+  if (state.summary) return renderSummary();
   return renderToday();
 }
 
@@ -1470,7 +1482,21 @@ function renderToday() {
   const nextEx = next ? next.entries.filter((en) => validSets(en).length).length : 0;
   const challenge = next ? challengeFor(next) : '';
 
-  const hero = next ? `
+  // V3.3: läuft gerade ein Training → statt «Als Nächstes» die Karte zum Weitermachen
+  const live = activeWorkout();
+  const liveC = live ? sessionCounts(live) : null;
+  const liveMin = live ? Math.max(0, Math.floor((Date.now() - Date.parse(live.createdAt || '')) / 60000)) : 0;
+  const hero = live ? `
+      <section class="next live">
+        <div class="next-top"><span class="eyebrow"><i class="live-dot"></i>Läuft gerade</span><span>seit ${Number.isFinite(liveMin) && liveMin < 720 ? `${liveMin} min` : '–'}</span></div>
+        <h2 class="next-name">${live.name ? esc(live.name) : 'Aktuelles Training'}</h2>
+        <div class="next-stats">
+          <div><b class="tnum">${live.entries.length}</b><span>${live.entries.length === 1 ? 'Übung' : 'Übungen'}</span></div>
+          <div><b class="tnum">${liveC.done}<small>/${liveC.all}</small></b><span>Sätze</span></div>
+          <div><b class="tnum">${liveC.all ? Math.round((liveC.done / liveC.all) * 100) : 0} %</b><span>geschafft</span></div>
+        </div>
+        <button class="next-go" data-action="nav" data-view="training">${ICON_PLAY}Weitermachen</button>
+      </section>` : next ? `
       <section class="next">
         <div class="next-top"><span class="eyebrow">Als Nächstes</span><span>zuletzt ${esc(relativeDay(next.date).replace(/^(Heute|Gestern)$/, (m) => m.toLowerCase()))}</span></div>
         <h2 class="next-name">${next.name ? esc(next.name) : 'Letztes Training'}</h2>
@@ -1493,7 +1519,7 @@ function renderToday() {
     <div class="today-head">
       <div>
         <p class="sub">${esc(parseISODate(today).toLocaleDateString('de-CH', { weekday: 'long', day: 'numeric', month: 'long' }))}</p>
-        <h1 class="title">${hello}<br>${next && next.name ? `Zeit für <span class="hl">${esc(next.name)}</span>` : 'Zeit fürs Training'}</h1>
+        <h1 class="title">${hello}<br>Zeit für ein <span class="hl">Training!</span></h1>
       </div>
       ${streak ? `<span class="streak" title="${streak} ${streak === 1 ? 'Woche' : 'Wochen'} in Folge Wochenziel erreicht">${ICON_FLAME}<b class="tnum">${streak}</b> ${streak === 1 ? 'Woche' : 'Wochen'}</span>` : ''}
     </div>
@@ -1530,7 +1556,7 @@ function renderToday() {
         </div>` : ''}
       </div>
     </div>
-    <div>
+    <div ${live ? 'hidden' : ''}>
       ${others.length ? '<div class="eyebrow" style="margin:0 2px 8px">Oder lieber</div>' : ''}
       <div class="chips" ${others.length ? '' : 'hidden'}>
         ${others.map((w) => `<button class="chip chip-name ${w.name ? tagClass(w.name) : ''}" data-action="start-repeat" data-id="${esc(w.id)}">${w.name ? '<i class="tag-dot"></i>' : ''}${w.name ? esc(w.name) : 'Letztes Training'} <small>${esc(relativeDay(w.date))}</small></button>`).join('')}
@@ -2108,6 +2134,8 @@ function renderSettings() {
       }).join('')}</div>
     </div>` : ''}
 
+    ${exercisesCardHtml(exercises)}
+
     <div class="group-h">Aussehen</div>
     <div class="card">
       <div class="card-head"><h2>Darstellung</h2>
@@ -2122,30 +2150,10 @@ function renderSettings() {
         </button>`).join('')}</div>
     </div>
 
+    <div class="group-h">Hilfe</div>
+    ${feedbackCardHtml()}
+
     <div class="group-h">Konto und Daten</div>
-    <div class="card">
-      <h2>Konto</h2>
-      <form class="acc-form" data-form="account-name">
-        <label class="field">Name
-          <input class="input" name="name" value="${esc(profile.display_name || '')}" maxlength="60" autocomplete="nickname" placeholder="Vorname oder Spitzname">
-        </label>
-        <button class="btn btn-s" type="submit">Speichern</button>
-      </form>
-      <p class="small muted">Angemeldet als <b>${esc(profile.email || '–')}</b>${isAdmin() ? ' · Admin' : ''}</p>
-      <details class="acc-pw">
-        <summary>Passwort ändern</summary>
-        <form class="gate-actions" data-form="account-password" novalidate>
-          <label class="field">Neues Passwort (mind. ${MIN_PASSWORD} Zeichen)
-            <input class="input" name="password" type="password" autocomplete="new-password" minlength="${MIN_PASSWORD}" required>
-          </label>
-          <label class="field">Passwort wiederholen
-            <input class="input" name="password2" type="password" autocomplete="new-password" minlength="${MIN_PASSWORD}" required>
-          </label>
-          <button class="btn btn-s" type="submit">Passwort speichern</button>
-        </form>
-      </details>
-      <button class="btn btn-d" data-action="logout">Abmelden</button>
-    </div>
 
     ${isAdmin() ? `<div class="card">
       <div class="card-head"><h2>Admin</h2><span class="badge-soft">nur lesen</span></div>
@@ -2194,6 +2202,58 @@ function renderSettings() {
       </div>
     </div>
 
+    <div class="card">
+      <h2>Konto</h2>
+      <form class="acc-form" data-form="account-name">
+        <label class="field">Name
+          <input class="input" name="name" value="${esc(profile.display_name || '')}" maxlength="60" autocomplete="nickname" placeholder="Vorname oder Spitzname">
+        </label>
+        <button class="btn btn-s" type="submit">Speichern</button>
+      </form>
+      <p class="small muted">Angemeldet als <b>${esc(profile.email || '–')}</b>${isAdmin() ? ' · Admin' : ''}</p>
+      <details class="acc-pw">
+        <summary>Passwort ändern</summary>
+        <form class="gate-actions" data-form="account-password" novalidate>
+          <label class="field">Neues Passwort (mind. ${MIN_PASSWORD} Zeichen)
+            <input class="input" name="password" type="password" autocomplete="new-password" minlength="${MIN_PASSWORD}" required>
+          </label>
+          <label class="field">Passwort wiederholen
+            <input class="input" name="password2" type="password" autocomplete="new-password" minlength="${MIN_PASSWORD}" required>
+          </label>
+          <button class="btn btn-s" type="submit">Passwort speichern</button>
+        </form>
+      </details>
+      <button class="btn btn-d" data-action="logout">Abmelden</button>
+    </div>`;
+}
+
+/** V3.3: Feedback-Formular (Nachricht geht per Mail an den Betreiber). */
+const FEEDBACK_MAX = 2000;
+function feedbackCardHtml() {
+  if (state.feedbackSent) {
+    return `<div class="card fb-done">
+      <div class="fb-ok">${ICON_CHECK}</div>
+      <div><b>Danke für dein Feedback!</b><p class="small muted">Es ist angekommen. Ich lese jede Nachricht.</p></div>
+      <button class="btn btn-s btn-sm" data-action="feedback-again">Noch eins</button>
+    </div>`;
+  }
+  return `<div class="card">
+    <div class="card-head"><h2>Feedback</h2><span class="small muted">geht direkt per Mail an mich</span></div>
+    <form class="fb-form" data-form="feedback">
+      <div class="seg fb-kind" role="radiogroup" aria-label="Art">
+        ${[['idee', 'Idee'], ['fehler', 'Fehler'], ['lob', 'Lob'], ['sonst', 'Sonstiges']].map(([k, l], i) =>
+          `<label><input type="radio" name="kind" value="${k}" ${i === 0 ? 'checked' : ''}><span>${l}</span></label>`).join('')}
+      </div>
+      <textarea class="input fb-text" name="message" rows="4" maxlength="${FEEDBACK_MAX}" placeholder="Was gefällt dir, was fehlt, was klemmt?" aria-label="Deine Nachricht" required>${esc(state.feedbackDraft || '')}</textarea>
+      <div class="fb-foot"><span class="small muted">Deine E-Mail wird mitgeschickt, damit ich antworten kann.</span>
+        <button class="btn btn-p" type="submit">Senden</button></div>
+    </form>
+  </div>`;
+}
+
+/** V3.3: Karte «Übungen» (steht unter «Training»). */
+function exercisesCardHtml(exercises) {
+  return `
     <div class="card">
       <h2>Übungen</h2>
       ${exercises.length ? (() => {
@@ -2727,6 +2787,7 @@ function finishWorkout() {
   state.meta.activeWorkoutId = null;
   state.meta.doneSets = {};
   state.focus = null;
+  state.view = 'home';
   hideRest();
   if (w && w.entries.length === 0) {
     // Leere Trainings nicht aufbewahren
@@ -2848,7 +2909,7 @@ const moreActions = {
     tick();
   },
   'rest-skip': () => hideRest(),
-  'summary-close': () => { state.summary = null; render(); },
+  'summary-close': () => { state.summary = null; setView('home'); },
 
   'stats-ex': (el) => {
     state.statsExerciseId = el.dataset.id;
@@ -2860,6 +2921,7 @@ const moreActions = {
     state.statsExerciseId = el.dataset.id;
     setView('stats');
   },
+  'feedback-again': () => { state.feedbackSent = false; render(); },
   'hist-filter': (el) => {
     state.histFilter = el.dataset.name || '';
     render();
@@ -3218,6 +3280,32 @@ const forms = {
   },
 
   /* Konto */
+  // V3.3: Feedback → Supabase Edge Function «send-feedback» (speichert + schickt Mail über Brevo)
+  feedback: async (form) => {
+    const message = form.message.value.trim().slice(0, FEEDBACK_MAX);
+    const kind = form.kind.value;
+    if (message.length < 3) { toast('Schreib kurz, worum es geht'); return; }
+    if (!state.auth.client || !state.sync.configured) { toast('Offline: Feedback geht erst mit Internet'); return; }
+    const btn = form.querySelector('button[type="submit"]');
+    btn.disabled = true; btn.textContent = 'Wird gesendet …';
+    try {
+      const { data, error } = await state.auth.client.functions.invoke('send-feedback', {
+        body: { message, kind, app: IS_TEST ? 'test' : 'live', version: 'v3.3', page: location.pathname, agent: navigator.userAgent.slice(0, 200) },
+      });
+      if (error) throw error;
+      if (data && data.error) throw new Error(data.error);
+      state.feedbackSent = true;
+      state.feedbackDraft = '';
+      render();
+      toast('Danke! Feedback ist angekommen');
+    } catch (err) {
+      console.warn(err);
+      btn.disabled = false; btn.textContent = 'Senden';
+      const status = err && err.context && err.context.status;
+      toast(status === 429 ? 'Zu viel auf einmal, versuch es später nochmals' : 'Hat nicht geklappt, versuch es später nochmals');
+    }
+  },
+
   'account-name': async (form) => {
     const name = form.name.value.trim().slice(0, 60);
     try {
@@ -3350,6 +3438,7 @@ function bindEvents() {
   });
 
   document.addEventListener('input', (e) => {
+    if (e.target.classList && e.target.classList.contains('fb-text')) { state.feedbackDraft = e.target.value; return; }
     if (state.admin.viewAs) return;
     if (e.target.dataset && e.target.dataset.field) onFieldInput(e.target);
   });
@@ -3428,7 +3517,7 @@ function startApp(user, { offline = false } = {}) {
   if (user.email && !state.meta.profile) state.meta.profile = { email: user.email, display_name: '', is_admin: false };
   if (state.meta.activeWorkoutId && !getWorkout(state.meta.activeWorkoutId)) state.meta.activeWorkoutId = null;
   state.admin = { users: null, inviteCode: null, viewAs: null, ownData: null };
-  state.view = 'training';
+  state.view = state.meta.activeWorkoutId ? 'training' : 'home';
   state.summary = null;
   state.focus = null;
   document.body.classList.remove('read-only');

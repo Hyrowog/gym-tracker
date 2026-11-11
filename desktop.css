@@ -120,6 +120,12 @@
   .tile:hover { border-color: var(--text-3); }
   .tile[aria-pressed="true"]:hover { border-color: var(--accent); }
 
+  /* ---------- V3.3 Navigation: langer Name «Aktuelles Training», Logo führt zur Startseite ---------- */
+  .tab .l-long { display: inline; }
+  .tab .l-short { display: none; }
+  .tab-live::after { top: 6px; left: 22px; }
+  button.brand:hover { opacity: .85; }
+
   /* ---------- V3.3 Startseite: Hauptkarte links, Ziel + Kacheln rechts ---------- */
   .today-grid { display: grid; grid-template-columns: 1.25fr 1fr; align-items: stretch; }
   .next { padding: 24px; }

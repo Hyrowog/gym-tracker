@@ -14,16 +14,21 @@
   <link rel="stylesheet" href="styles.css">
   <link rel="stylesheet" href="desktop.css" media="(min-width: 900px)">
 </head>
-<body data-view="training">
+<body data-view="home">
   <!-- App-Gerüst. Der Inhalt von #view wird von app.js gezeichnet.
        Handy: Tab-Leiste unten. PC (desktop.css): Seitenleiste links. -->
   <div id="app" class="shell" hidden>
     <aside class="side">
-      <div class="brand"><span class="logo" id="brandLogo"></span>Gym-Tracker</div>
+      <button class="brand" type="button" data-action="nav" data-view="home" aria-label="Zur Startseite"><span class="logo" id="brandLogo"></span>Gym-Tracker</button>
       <nav class="nav" aria-label="Hauptnavigation">
-        <button class="tab" data-action="nav" data-view="training">
+        <button class="tab" data-action="nav" data-view="home">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 11l8-6.5 8 6.5M6.5 9.5V19h11V9.5M10 19v-5h4v5"/></svg>
+          <span>Start</span>
+        </button>
+        <!-- erscheint nur, solange ein Training läuft -->
+        <button class="tab tab-live" data-action="nav" data-view="training" hidden>
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9v6M7 7v10M17 7v10M20 9v6M7 12h10"/></svg>
-          <span>Training</span>
+          <span class="l-long">Aktuelles Training</span><span class="l-short">Aktuell</span>
         </button>
         <button class="tab" data-action="nav" data-view="history">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 6h14M5 12h14M5 18h9"/></svg>
